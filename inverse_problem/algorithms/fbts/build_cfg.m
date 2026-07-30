@@ -183,4 +183,5 @@ cfg.source = struct();
 cfg.source.location = cfg.antennas.pos;
 cfg.source.samples = zeros(cfg.antennas.numAntennas, cfg.Nt);
 
-% Algorithm controls are declared directly in fbts.m.
+% Algorithm defaults are declared in fbts.m and may be overridden through
+% the optional fbtsOptions workspace structure.

@@ -1,11 +1,19 @@
 % fbts Reconstruct lossless relative permittivity from Ez data by FBTS.
 % Run build_cfg.m immediately before this script.
+% Optional workspace struct fbtsOptions may set numIterations,
+% sensitivityDownsampleFactor, outputDirectory, and runLabel.
 
 assert(exist('cfg', 'var') == 1 && isstruct(cfg), ...
     'fbts:MissingConfig', 'Run build_cfg.m before fbts.m.');
 assert(exist('fdtd_mex', 'file') == 3, ...
     'fbts:MissingFdtdMex', ...
     'Build forward_solver/mex/fdtd_mex before running fbts.m.');
+
+if exist('fbtsOptions', 'var') == 1
+    activeFbtsOptions = resolveFbtsOptions(fbtsOptions);
+else
+    activeFbtsOptions = resolveFbtsOptions();
+end
 
 %% Paper source pulse and inversion setup
 time = (0:cfg.Nt-1) .* cfg.dt;
@@ -21,9 +29,9 @@ assert(isfield(cfg, 'deltaF') && isnumeric(cfg.deltaF) && ...
     isscalar(cfg.deltaF) && isfinite(cfg.deltaF) && cfg.deltaF > 0, ...
     'fbts:InvalidDeltaF', ...
     'cfg.deltaF must be a finite positive frequency resolution.');
-sensitivityDownsampleFactor = 4;
-
-numIterations = 15;
+sensitivityDownsampleFactor = ...
+    activeFbtsOptions.sensitivityDownsampleFactor;
+numIterations = activeFbtsOptions.numIterations;
 transmitters = cfg.antennas.txAntennas;
 numTransmitters = numel(transmitters);
 numReceivers = cfg.antennas.numAntennas;
@@ -204,23 +212,41 @@ for iteration = 1:numIterations
     stepA = 0;
     stepQ = 0;
 
-    coarseBaseCfg = cfg;
-    coarseBaseCfg.grid.epsr = epsrEst;
-    coarseBaseCfg = prepareCoarseSensitivityCfg( ...
-        coarseBaseCfg, sensitivityDownsampleFactor);
-    coarsePerturbedCfg = cfg;
-    coarsePerturbedCfg.grid.epsr = epsrPerturbed;
-    coarsePerturbedCfg = prepareCoarseSensitivityCfg( ...
-        coarsePerturbedCfg, sensitivityDownsampleFactor);
-    assert(coarseBaseCfg.dt == coarsePerturbedCfg.dt && ...
-        coarseBaseCfg.Nt == coarsePerturbedCfg.Nt, ...
-        'fbts:SensitivityTimeGridMismatch', ...
-        'Coarse baseline and perturbation time grids must match.');
-    coarseTime = (0:coarseBaseCfg.Nt-1) .* coarseBaseCfg.dt;
-    coarseSourcePulse = cfg.source.func(coarseTime);
-    coarseK = interp1(time, K, coarseTime, 'linear', 0);
-    sensitivityDtHistory(iteration) = coarseBaseCfg.dt;
-    sensitivityNtHistory(iteration) = coarseBaseCfg.Nt;
+    if sensitivityDownsampleFactor == 1
+        sensitivityBaselineStrategy = "reuse forward model";
+        sensitivityTime = time;
+        sensitivitySourcePulse = sourcePulse;
+        sensitivityK = K;
+        sensitivityDt = cfg.dt;
+        sensitivityNt = cfg.Nt;
+        sensitivityPerturbedCfg = cfg;
+        sensitivityPerturbedCfg.grid.epsr = epsrPerturbed;
+        sensitivityPerturbedCfg.returnEz = false;
+        sensitivityPerturbedCfg.returnHx = false;
+        sensitivityPerturbedCfg.returnHy = false;
+        sensitivityPerturbedCfg.returnRxSignals = true;
+    else
+        sensitivityBaselineStrategy = "paired resized solves";
+        sensitivityBaseCfg = cfg;
+        sensitivityBaseCfg.grid.epsr = epsrEst;
+        sensitivityBaseCfg = prepareCoarseSensitivityCfg( ...
+            sensitivityBaseCfg, sensitivityDownsampleFactor);
+        sensitivityPerturbedCfg = cfg;
+        sensitivityPerturbedCfg.grid.epsr = epsrPerturbed;
+        sensitivityPerturbedCfg = prepareCoarseSensitivityCfg( ...
+            sensitivityPerturbedCfg, sensitivityDownsampleFactor);
+        assert(sensitivityBaseCfg.dt == sensitivityPerturbedCfg.dt && ...
+            sensitivityBaseCfg.Nt == sensitivityPerturbedCfg.Nt, ...
+            'fbts:SensitivityTimeGridMismatch', ...
+            'Resized baseline and perturbation time grids must match.');
+        sensitivityDt = sensitivityBaseCfg.dt;
+        sensitivityNt = sensitivityBaseCfg.Nt;
+        sensitivityTime = (0:sensitivityNt-1) .* sensitivityDt;
+        sensitivitySourcePulse = cfg.source.func(sensitivityTime);
+        sensitivityK = interp1(time, K, sensitivityTime, 'linear', 0);
+    end
+    sensitivityDtHistory(iteration) = sensitivityDt;
+    sensitivityNtHistory(iteration) = sensitivityNt;
 
     fprintf('Computing iteration %d directional sensitivity\n', iteration);
     for transmitterIndex = 1:numTransmitters
@@ -230,31 +256,44 @@ for iteration = 1:numIterations
         residualEz = modelEz - ...
             reshape(EzMeasured(transmitterIndex, :, :), ...
             numReceivers, cfg.Nt);
-        coarseResidualEz = interp1( ...
-            time, residualEz.', coarseTime, 'linear', 0).';
-
-        coarseBaseCfg.source.samples(:) = 0;
-        coarseBaseCfg.source.samples(transmitter, :) = coarseSourcePulse;
-        coarseBaselineResult = fdtd_mex(coarseBaseCfg);
-        coarsePerturbedCfg.source.samples(:) = 0;
-        coarsePerturbedCfg.source.samples(transmitter, :) = coarseSourcePulse;
-        coarsePerturbedResult = fdtd_mex(coarsePerturbedCfg);
-
-        coarseSensitivityEz = ...
-            (coarsePerturbedResult.rx_signals - ...
-            coarseBaselineResult.rx_signals) ./ finiteDifferenceH;
-        sensitivityEz = interp1( ...
-            coarseTime, coarseSensitivityEz.', time, 'linear', 0).';
+        if sensitivityDownsampleFactor == 1
+            sensitivityResidualEz = residualEz;
+            sensitivityPerturbedCfg.source.samples(:) = 0;
+            sensitivityPerturbedCfg.source.samples(transmitter, :) = ...
+                sensitivitySourcePulse;
+            sensitivityPerturbedResult = fdtd_mex(sensitivityPerturbedCfg);
+            lineSearchSensitivityEz = ...
+                (sensitivityPerturbedResult.rx_signals - modelEz) ./ ...
+                finiteDifferenceH;
+            sensitivityEz = lineSearchSensitivityEz;
+            clear sensitivityPerturbedResult
+        else
+            sensitivityResidualEz = interp1( ...
+                time, residualEz.', sensitivityTime, 'linear', 0).';
+            sensitivityBaseCfg.source.samples(:) = 0;
+            sensitivityBaseCfg.source.samples(transmitter, :) = ...
+                sensitivitySourcePulse;
+            sensitivityBaselineResult = fdtd_mex(sensitivityBaseCfg);
+            sensitivityPerturbedCfg.source.samples(:) = 0;
+            sensitivityPerturbedCfg.source.samples(transmitter, :) = ...
+                sensitivitySourcePulse;
+            sensitivityPerturbedResult = fdtd_mex(sensitivityPerturbedCfg);
+            lineSearchSensitivityEz = ...
+                (sensitivityPerturbedResult.rx_signals - ...
+                sensitivityBaselineResult.rx_signals) ./ finiteDifferenceH;
+            sensitivityEz = interp1( ...
+                sensitivityTime, lineSearchSensitivityEz.', ...
+                time, 'linear', 0).';
+            clear sensitivityBaselineResult sensitivityPerturbedResult
+        end
         EzSensitivity(transmitterIndex, :, :) = reshape( ...
             sensitivityEz, 1, numReceivers, cfg.Nt);
         stepA = stepA + ...
-            sum(coarseK .* coarseSensitivityEz.^2, 'all') .* ...
-            coarseBaseCfg.dt;
+            sum(sensitivityK .* lineSearchSensitivityEz.^2, 'all') .* ...
+            sensitivityDt;
         stepQ = stepQ - ...
-            sum(coarseK .* coarseResidualEz .* coarseSensitivityEz, 'all') .* ...
-            coarseBaseCfg.dt;
-
-        clear coarseBaselineResult coarsePerturbedResult
+            sum(sensitivityK .* sensitivityResidualEz .* ...
+            lineSearchSensitivityEz, 'all') .* sensitivityDt;
         fprintf('Sensitivity iteration %d/%d, transmitter %d/%d.\n', ...
             iteration, numIterations, transmitterIndex, numTransmitters);
     end
@@ -327,7 +366,9 @@ results.epsr_lower_bound = epsrLowerBound;
 results.step_a = stepAHistory;
 results.step_q = stepQHistory;
 results.finite_difference_h = finiteDifferenceHHistory;
+results.num_iterations = numIterations;
 results.sensitivity_downsample_factor = sensitivityDownsampleFactor;
+results.sensitivity_baseline_strategy = sensitivityBaselineStrategy;
 results.sensitivity_dt = sensitivityDtHistory;
 results.sensitivity_Nt = sensitivityNtHistory;
 results.iteration_runtime = iterationRuntime;
@@ -342,6 +383,7 @@ results.doi_mask = doiMask;
 results.Ez_measured = EzMeasured;
 results.Ez_model = EzModel;
 results.Ez_sensitivity = EzSensitivity;
+results.run_label = activeFbtsOptions.runLabel;
 
 scriptPath = mfilename('fullpath');
 if isempty(scriptPath)
@@ -349,7 +391,27 @@ if isempty(scriptPath)
 else
     scriptDir = fileparts(scriptPath);
 end
-runOutputDirectory = createNextRunDirectory(fullfile(scriptDir, 'figs'));
+if strlength(activeFbtsOptions.outputDirectory) == 0
+    runOutputDirectory = createNextFbtsOutputDirectory( ...
+        fullfile(scriptDir, 'figs'), 'run');
+else
+    runOutputDirectory = char(activeFbtsOptions.outputDirectory);
+    if isfolder(runOutputDirectory)
+        existingOutput = dir(runOutputDirectory);
+        existingOutput = existingOutput(~ismember( ...
+            {existingOutput.name}, {'.', '..'}));
+        if ~isempty(existingOutput)
+            error('fbts:OutputDirectoryNotEmpty', ...
+                'The requested output directory is not empty: %s', ...
+                runOutputDirectory);
+        end
+    else
+        [created, message] = mkdir(runOutputDirectory);
+        if ~created
+            error('fbts:CreateRunDirectoryFailed', '%s', message);
+        end
+    end
+end
 figureFiles = [ ...
     string(fullfile(runOutputDirectory, ...
         '01_true_relative_permittivity.png'))
@@ -370,38 +432,3 @@ plot_fbts;
 save(char(resultFile), 'cfg', 'results', '-v7.3');
 fprintf('Saved FBTS figures and run data under %s.\n', ...
     runOutputDirectory);
-
-function runDirectory = createNextRunDirectory(outputRoot)
-outputRoot = char(outputRoot);
-if ~isfolder(outputRoot)
-    [created, message] = mkdir(outputRoot);
-    if ~created
-        error('fbts:CreateOutputRootFailed', '%s', message);
-    end
-end
-
-existingRuns = dir(fullfile(outputRoot, 'run_*'));
-existingRuns = existingRuns([existingRuns.isdir]);
-runNumbers = nan(numel(existingRuns), 1);
-numMatchedRuns = 0;
-for directoryIndex = 1:numel(existingRuns)
-    token = regexp(existingRuns(directoryIndex).name, ...
-        '^run_(\d+)$', 'tokens', 'once');
-    if ~isempty(token)
-        numMatchedRuns = numMatchedRuns + 1;
-        runNumbers(numMatchedRuns) = str2double(token{1});
-    end
-end
-runNumbers = runNumbers(1:numMatchedRuns);
-if isempty(runNumbers)
-    nextRunNumber = 1;
-else
-    nextRunNumber = max(runNumbers) + 1;
-end
-
-runDirectory = fullfile(outputRoot, sprintf('run_%04d', nextRunNumber));
-[created, message] = mkdir(runDirectory);
-if ~created
-    error('fbts:CreateRunDirectoryFailed', '%s', message);
-end
-end
