@@ -1,62 +1,35 @@
 function newgrid = BlurAndDownsample(highGrid, refine)
-%BlurAndDownsample FFT-blur high-resolution material maps and sample to a coarse grid.
+%BlurAndDownsample Blur and downsample every material map in a grid struct.
+%   This compatibility wrapper delegates to fdtdmat.downsampleCfg so grid
+%   construction and staggered material-map handling have one implementation.
 
 if nargin ~= 2
     error('fdtdmat:BlurAndDownsample:InvalidInputCount', ...
         'Expected highGrid and refine inputs.');
 end
-if ~isstruct(highGrid)
-    error('fdtdmat:BlurAndDownsample:InvalidGrid', 'highGrid must be a grid struct.');
-end
-if ~isnumeric(refine) || ~isscalar(refine) || ~isfinite(refine) || refine < 1 || fix(refine) ~= refine
-    error('fdtdmat:BlurAndDownsample:InvalidRefine', ...
-        'refine must be a positive integer scalar.');
-end
-if ~isfield(highGrid, 'sizeXY') || ~isfield(highGrid, 'spacingXY') || ...
-        ~isfield(highGrid, 'originPhysical') || ~isfield(highGrid, 'background')
+if ~isstruct(highGrid) || ~isscalar(highGrid) || ...
+        ~isfield(highGrid, 'sizeXY') || ...
+        ~isfield(highGrid, 'spacingXY') || ...
+        ~isfield(highGrid, 'originPhysical') || ...
+        ~isfield(highGrid, 'background')
     error('fdtdmat:BlurAndDownsample:InvalidGrid', ...
-        'highGrid must contain sizeXY, spacingXY, originPhysical, and background fields.');
+        ['highGrid must contain sizeXY, spacingXY, originPhysical, ' ...
+        'and background fields.']);
 end
-
-coarseSize = highGrid.sizeXY ./ refine;
-if any(mod(highGrid.sizeXY, refine) ~= 0)
+if ~isnumeric(refine) || ~isscalar(refine) || ~isfinite(refine) || ...
+        refine < 1 || refine ~= round(refine) || ...
+        any(mod(highGrid.sizeXY, refine) ~= 0)
     error('fdtdmat:BlurAndDownsample:InvalidRefine', ...
-        'highGrid.sizeXY must be divisible by refine.');
+        ['refine must be a positive integer that divides both entries ' ...
+        'of highGrid.sizeXY.']);
 end
 
-newgrid = fdtdmat.createGrid( ...
-    coarseSize, ...
-    highGrid.spacingXY .* refine, ...
-    highGrid.background, ...
-    highGrid.originPhysical);
-
-fieldsToSmooth = {'epsr', 'cond_e', 'cond_m'};
-for fieldIndex = 1:numel(fieldsToSmooth)
-    fieldName = fieldsToSmooth{fieldIndex};
-    if isfield(highGrid, fieldName)
-        newgrid.(fieldName) = blurAndSample(highGrid.(fieldName), refine, coarseSize, fieldName);
-    end
-end
-end
-
-function coarseMap = blurAndSample(highMap, refine, coarseSize, fieldName)
-if ~isnumeric(highMap) || ~ismatrix(highMap)
-    error('fdtdmat:BlurAndDownsample:InvalidMap', ...
-        'highGrid.%s must be a numeric 2-D matrix.', fieldName);
-end
-
-kernel = zeros(size(highMap));
-kernel(1:refine, 1:refine) = 1 / refine^2;
-kernel = circshift(kernel, -floor([refine refine] / 2));
-
-convolved = real(ifft2(fft2(highMap) .* fft2(kernel)));
-
-sampleX = floor(refine / 2) + 1 : refine : size(highMap, 1);
-sampleY = floor(refine / 2) + 1 : refine : size(highMap, 2);
-coarseMap = convolved(sampleX, sampleY);
-
-if ~isequal(size(coarseMap), coarseSize)
-    error('fdtdmat:BlurAndDownsample:DownsampleSizeMismatch', ...
-        'Downsampled %s map does not match the expected coarse size.', fieldName);
-end
+temporaryCfg = struct( ...
+    'Nx', highGrid.sizeXY(1), ...
+    'Ny', highGrid.sizeXY(2), ...
+    'dx', highGrid.spacingXY(1), ...
+    'dy', highGrid.spacingXY(2), ...
+    'grid', highGrid);
+coarseCfg = fdtdmat.downsampleCfg(temporaryCfg, refine);
+newgrid = coarseCfg.grid;
 end

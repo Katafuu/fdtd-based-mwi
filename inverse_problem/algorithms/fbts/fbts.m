@@ -17,6 +17,12 @@ T = time(end);
 K = cos(pi .* time ./ (2 .* T));
 K(end) = 0;
 
+assert(isfield(cfg, 'deltaF') && isnumeric(cfg.deltaF) && ...
+    isscalar(cfg.deltaF) && isfinite(cfg.deltaF) && cfg.deltaF > 0, ...
+    'fbts:InvalidDeltaF', ...
+    'cfg.deltaF must be a finite positive frequency resolution.');
+sensitivityDownsampleFactor = 4;
+
 numIterations = 15;
 transmitters = cfg.antennas.txAntennas;
 numTransmitters = numel(transmitters);
@@ -66,6 +72,8 @@ directionalDerivativeHistory = zeros(numIterations, 1);
 stepAHistory = zeros(numIterations, 1);
 stepQHistory = zeros(numIterations, 1);
 finiteDifferenceHHistory = zeros(numIterations, 1);
+sensitivityDtHistory = zeros(numIterations, 1);
+sensitivityNtHistory = zeros(numIterations, 1);
 EzModel = zeros(numTransmitters, numReceivers, cfg.Nt);
 EzSensitivity = zeros(numTransmitters, numReceivers, cfg.Nt);
 previousProjectedGradEpsr = zeros(size(epsrEst));
@@ -195,6 +203,25 @@ for iteration = 1:numIterations
 
     stepA = 0;
     stepQ = 0;
+
+    coarseBaseCfg = cfg;
+    coarseBaseCfg.grid.epsr = epsrEst;
+    coarseBaseCfg = prepareCoarseSensitivityCfg( ...
+        coarseBaseCfg, sensitivityDownsampleFactor);
+    coarsePerturbedCfg = cfg;
+    coarsePerturbedCfg.grid.epsr = epsrPerturbed;
+    coarsePerturbedCfg = prepareCoarseSensitivityCfg( ...
+        coarsePerturbedCfg, sensitivityDownsampleFactor);
+    assert(coarseBaseCfg.dt == coarsePerturbedCfg.dt && ...
+        coarseBaseCfg.Nt == coarsePerturbedCfg.Nt, ...
+        'fbts:SensitivityTimeGridMismatch', ...
+        'Coarse baseline and perturbation time grids must match.');
+    coarseTime = (0:coarseBaseCfg.Nt-1) .* coarseBaseCfg.dt;
+    coarseSourcePulse = cfg.source.func(coarseTime);
+    coarseK = interp1(time, K, coarseTime, 'linear', 0);
+    sensitivityDtHistory(iteration) = coarseBaseCfg.dt;
+    sensitivityNtHistory(iteration) = coarseBaseCfg.Nt;
+
     fprintf('Computing iteration %d directional sensitivity\n', iteration);
     for transmitterIndex = 1:numTransmitters
         transmitter = transmitters(transmitterIndex);
@@ -203,27 +230,31 @@ for iteration = 1:numIterations
         residualEz = modelEz - ...
             reshape(EzMeasured(transmitterIndex, :, :), ...
             numReceivers, cfg.Nt);
+        coarseResidualEz = interp1( ...
+            time, residualEz.', coarseTime, 'linear', 0).';
 
-        sensitivityCfg = cfg;
-        sensitivityCfg.grid.epsr = epsrPerturbed;
-        sensitivityCfg.returnEz = false;
-        sensitivityCfg.returnHx = false;
-        sensitivityCfg.returnHy = false;
-        sensitivityCfg.returnRxSignals = true;
-        sensitivityCfg.source.samples(:) = 0;
-        sensitivityCfg.source.samples(transmitter, :) = sourcePulse;
-        perturbedResult = fdtd_mex(sensitivityCfg);
+        coarseBaseCfg.source.samples(:) = 0;
+        coarseBaseCfg.source.samples(transmitter, :) = coarseSourcePulse;
+        coarseBaselineResult = fdtd_mex(coarseBaseCfg);
+        coarsePerturbedCfg.source.samples(:) = 0;
+        coarsePerturbedCfg.source.samples(transmitter, :) = coarseSourcePulse;
+        coarsePerturbedResult = fdtd_mex(coarsePerturbedCfg);
 
-        sensitivityEz = ...
-            (perturbedResult.rx_signals - modelEz) ./ finiteDifferenceH;
+        coarseSensitivityEz = ...
+            (coarsePerturbedResult.rx_signals - ...
+            coarseBaselineResult.rx_signals) ./ finiteDifferenceH;
+        sensitivityEz = interp1( ...
+            coarseTime, coarseSensitivityEz.', time, 'linear', 0).';
         EzSensitivity(transmitterIndex, :, :) = reshape( ...
             sensitivityEz, 1, numReceivers, cfg.Nt);
         stepA = stepA + ...
-            sum(K .* sensitivityEz.^2, 'all') .* cfg.dt;
+            sum(coarseK .* coarseSensitivityEz.^2, 'all') .* ...
+            coarseBaseCfg.dt;
         stepQ = stepQ - ...
-            sum(K .* residualEz .* sensitivityEz, 'all') .* cfg.dt;
+            sum(coarseK .* coarseResidualEz .* coarseSensitivityEz, 'all') .* ...
+            coarseBaseCfg.dt;
 
-        clear perturbedResult
+        clear coarseBaselineResult coarsePerturbedResult
         fprintf('Sensitivity iteration %d/%d, transmitter %d/%d.\n', ...
             iteration, numIterations, transmitterIndex, numTransmitters);
     end
@@ -296,6 +327,9 @@ results.epsr_lower_bound = epsrLowerBound;
 results.step_a = stepAHistory;
 results.step_q = stepQHistory;
 results.finite_difference_h = finiteDifferenceHHistory;
+results.sensitivity_downsample_factor = sensitivityDownsampleFactor;
+results.sensitivity_dt = sensitivityDtHistory;
+results.sensitivity_Nt = sensitivityNtHistory;
 results.iteration_runtime = iterationRuntime;
 results.total_runtime = totalRuntime;
 results.average_runtime = averageRuntime;
