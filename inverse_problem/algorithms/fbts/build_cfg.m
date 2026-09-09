@@ -37,14 +37,14 @@ c0 = 1/sqrt(mu0*eps0);
 %% Random target controls
 randomSeed = [];
 targetOpts = struct();
-targetOpts.numTargetsRange = [1 1];
-targetOpts.allowedShapes = "rectangle";
-targetOpts.radiusRange = [10 28];
-targetOpts.sideRange = [31 31];
-targetOpts.epsrRange = [2.5 6.0];
+targetOpts.numTargetsRange = [1 6];
+targetOpts.allowedShapes = ["rectangle", "triangle", "circle"];
+targetOpts.radiusRange = [10 30];
+targetOpts.sideRange = [20 50];
+targetOpts.epsrRange = [2.0 6.0];
 targetOpts.condRange = [0 0];
 targetOpts.maxAttempts = 800;
-targetOpts.allowOverlap = false;
+targetOpts.allowOverlap = true;
 if ~isempty(randomSeed)
     rng(randomSeed);
 end

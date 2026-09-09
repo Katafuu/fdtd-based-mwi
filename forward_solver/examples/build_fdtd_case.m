@@ -7,13 +7,13 @@ if isempty(exampleDir)
 end
 solverRoot = fileparts("C:\Users\Galax\Desktop\PolitoCode");
 workspaceRoot = fileparts(solverRoot);
-addpath(fullfile(workspaceRoot, 'buildLib')); %[output:87113aab]
+addpath(fullfile(workspaceRoot, 'buildLib')); %[output:6ef51303]
 resultsDir = fullfile(solverRoot, 'results');
 inputDir = fullfile(resultsDir, 'fdtd_input');
-assert(isfile(fullfile(solverRoot, 'Makefile')) && ... %[output:group:91eda153] %[output:33c42e3f]
-       isfolder(fullfile(solverRoot, 'fdtd')) && ... %[output:33c42e3f]
-       isfolder(fullfile(solverRoot, 'utility')), ... %[output:33c42e3f]
-       'Keep this script under forward_solver/examples.'); %[output:group:91eda153] %[output:33c42e3f]
+assert(isfile(fullfile(solverRoot, 'Makefile')) && ...
+       isfolder(fullfile(solverRoot, 'fdtd')) && ...
+       isfolder(fullfile(solverRoot, 'utility')), ...
+       'Keep this script under forward_solver/examples.');
 %%
 %[text] ## Initialize Configuration
 %[text] Initialize the canonical configuration before constructing the grid, materials, CPML maps, source, and runtime settings.
@@ -128,16 +128,16 @@ cfg.pml.ky = pml.ky;
 %%
 %[text] ## Workspace Result
 %[text] The case is ready for either the MEX or standalone file runner. The normal |grid| and |pml| locals are retained for the file-backed interface.
-disp("Built FDTD case in workspace: cfg, grid, pml.");
+disp("Built FDTD case in workspace: cfg, grid, pml."); %[output:5367d3b7]
 
 %[appendix]{"version":"1.0"}
 %---
 %[metadata:view]
 %   data: {"layout":"inline"}
 %---
-%[output:87113aab]
-%   data: {"dataType":"warning","outputData":{"text":"Warning: Name is nonexistent or not a directory: C:\\Users\\Galax\\buildLib"}}
+%[output:6ef51303]
+%   data: {"dataType":"warning","outputData":{"text":"Warning: Name is nonexistent or not a directory: \/home\/aly\/Desktop\/fdtd-based-mwi\/forward_solver\/buildLib"}}
 %---
-%[output:33c42e3f]
-%   data: {"dataType":"error","outputData":{"errorType":"runtime","text":"Error using <a href=\"matlab:matlab.lang.internal.introspective.errorDocCallback('assert')\" style=\"font-weight:bold\">assert<\/a>\nKeep this script under forward_solver\/examples."}}
+%[output:5367d3b7]
+%   data: {"dataType":"text","outputData":{"text":"Built FDTD case in workspace: cfg, grid, pml.\n","truncated":false}}
 %---

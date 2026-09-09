@@ -7,11 +7,11 @@ if isempty(exampleDir)
 end
 solverRoot = fileparts(exampleDir);
 workspaceRoot = fileparts(solverRoot);
-addpath(fullfile(workspaceRoot, 'buildLib'));
-addpath(fullfile(solverRoot, 'mex'));
+addpath(fullfile(workspaceRoot, 'buildLib')); %[output:1d5063b3]
+addpath(fullfile(solverRoot, 'mex')); %[output:43faf56e]
 %%
 %[text] ## Load or Build the Case
-%[text] The MEX runner depends on the shared |cfg| struct created by |build_fdtd_case|. If |cfg| is not already in the workspace, this section builds the default case first.
+%[text] The MEX runner depends on the shared |cfg| struct created by |build\_fdtd\_case|. If |cfg| is not already in the workspace, this section builds the default case first.
 if ~exist('cfg', 'var') || ~isstruct(cfg) || ...
         ~isfield(cfg, 'grid') || ~isfield(cfg, 'pml') || ...
         ~isfield(cfg, 'antennas') || ~isfield(cfg, 'source') || ...
@@ -20,7 +20,7 @@ if ~exist('cfg', 'var') || ~isstruct(cfg) || ...
 end
 %%
 %[text] ## Locate or Build the MEX Function
-%[text] The compiled MEX file lives in the |mex| folder. If MATLAB cannot find |fdtd_mex|, this section runs the MEX build script before launching the simulation.
+%[text] The compiled MEX file lives in the |mex| folder. If MATLAB cannot find |fdtd\_mex|, this section runs the MEX build script before launching the simulation.
 if exist('fdtd_mex', 'file') ~= 3
     run(fullfile(solverRoot, 'mex', 'build_fdtd_mex.m'));
 end
@@ -28,7 +28,7 @@ end
 %[text] ## Run the Solver
 %[text] The MEX call passes |cfg| directly into C. The C solver uses the same update loop as the standalone executable, but output is captured in MATLAB arrays instead of written to CSV.
 tic;
-fdtdMexResult = fdtd_mex(cfg);
+fdtdMexResult = fdtd_mex(cfg); %[output:4a356fe9]
 mexRuntime = toc;
 %%
 %[text] ## Expose Returned Ez
@@ -52,8 +52,18 @@ end
 %[text] The final field and optional receiver traces are now available as |Ez| and |rxSignals|. Any plotting, comparison, or post-processing should happen in a separate visualization script.
 disp("MEX solver finished. Ez and rxSignals are available in the workspace.");
 fprintf("MEX runtime: %.6f seconds\n", mexRuntime);
+
 %[appendix]{"version":"1.0"}
 %---
 %[metadata:view]
 %   data: {"layout":"inline"}
+%---
+%[output:1d5063b3]
+%   data: {"dataType":"warning","outputData":{"text":"Warning: Name is nonexistent or not a directory: \/buildLib"}}
+%---
+%[output:43faf56e]
+%   data: {"dataType":"warning","outputData":{"text":"Warning: Name is nonexistent or not a directory: \/tmp\/mex"}}
+%---
+%[output:4a356fe9]
+%   data: {"dataType":"error","outputData":{"errorType":"runtime","text":"Unrecognized function or variable 'fdtd_mex'."}}
 %---
