@@ -1,5 +1,5 @@
-classdef fbtsCoarseSensitivityTest < matlab.unittest.TestCase
-    %fbtsCoarseSensitivityTest Smoke-test the coarse two-solve derivative.
+classdef fbtsSensitivityTest < matlab.unittest.TestCase
+    %fbtsSensitivityTest Verify the forward signals serve as the full-grid baseline.
 
     methods (TestClassSetup)
         function addRepositoryPaths(testCase)
@@ -16,44 +16,35 @@ classdef fbtsCoarseSensitivityTest < matlab.unittest.TestCase
     end
 
     methods (Test)
-        function coarseFiniteDifferenceHasConsistentTimeGrid(testCase)
+        function forwardSignalsMatchIndependentBaseline(testCase)
             cfg = makeSmallConfig();
+            sourcePulse = zeros(1, cfg.Nt);
+            sourcePulse(1) = 1;
+            cfg.source.samples(1, :) = sourcePulse;
+            cfg.returnEz = true;
+
+            forwardResult = fdtd_mex(cfg);
+            baselineCfg = cfg;
+            baselineCfg.returnEz = false;
+            baselineResult = fdtd_mex(baselineCfg);
+
             perturbationStep = 1e-3;
-            perturbedCfg = cfg;
+            perturbedCfg = baselineCfg;
             perturbedCfg.grid.epsr(7:10, 7:10) = ...
                 perturbedCfg.grid.epsr(7:10, 7:10) + perturbationStep;
+            perturbedResult = fdtd_mex(perturbedCfg);
 
-            coarseBaseCfg = prepareCoarseSensitivityCfg(cfg, 4);
-            coarsePerturbedCfg = prepareCoarseSensitivityCfg(perturbedCfg, 4);
-            coarseTime = coarseBaseCfg.source.time;
-            sourcePulse = zeros(1, coarseBaseCfg.Nt);
-            sourcePulse(1) = 1;
-            coarseBaseCfg.source.samples(1, :) = sourcePulse;
-            coarsePerturbedCfg.source.samples(1, :) = sourcePulse;
-
-            baselineResult = fdtd_mex(coarseBaseCfg);
-            perturbedResult = fdtd_mex(coarsePerturbedCfg);
-            coarseSensitivity = (perturbedResult.rx_signals - ...
+            sensitivityEz = (perturbedResult.rx_signals - ...
+                forwardResult.rx_signals) ./ perturbationStep;
+            referenceSensitivity = (perturbedResult.rx_signals - ...
                 baselineResult.rx_signals) ./ perturbationStep;
-            fineTime = (0:cfg.Nt-1) .* cfg.dt;
-            fineSensitivity = interp1( ...
-                coarseTime, coarseSensitivity.', fineTime, 'linear', 0).';
-            coarseWeight = ones(1, coarseBaseCfg.Nt);
-            stepA = sum(coarseWeight .* coarseSensitivity.^2, 'all') .* ...
-                coarseBaseCfg.dt;
 
-            testCase.verifyEqual([coarseBaseCfg.Nx coarseBaseCfg.Ny], [4 4]);
-            testCase.verifyEqual(coarseBaseCfg.dt, 4 * cfg.dt, RelTol=1e-12);
-            testCase.verifyEqual(coarseBaseCfg.Nt, ...
-                ceil(1 / (coarseBaseCfg.dt * cfg.deltaF)));
-            testCase.verifyEqual(size(coarseBaseCfg.source.samples), ...
-                [cfg.antennas.numAntennas coarseBaseCfg.Nt]);
-            testCase.verifyEqual(size(coarseSensitivity), ...
-                [cfg.antennas.numAntennas coarseBaseCfg.Nt]);
-            testCase.verifyEqual(size(fineSensitivity), ...
+            testCase.verifyEqual(forwardResult.rx_signals, ...
+                baselineResult.rx_signals);
+            testCase.verifyEqual(sensitivityEz, referenceSensitivity);
+            testCase.verifyEqual(size(sensitivityEz), ...
                 [cfg.antennas.numAntennas cfg.Nt]);
-            testCase.verifyTrue(all(isfinite(coarseSensitivity), 'all'));
-            testCase.verifyTrue(isfinite(stepA) && stepA >= 0);
+            testCase.verifyTrue(all(isfinite(sensitivityEz), 'all'));
         end
     end
 end

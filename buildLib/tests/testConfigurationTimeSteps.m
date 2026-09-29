@@ -31,14 +31,6 @@ classdef testConfigurationTimeSteps < matlab.unittest.TestCase
                 testCase.verifyEqual(size(cfg.source.samples), ...
                     [cfg.antennas.numAntennas cfg.Nt], ...
                     sprintf('Source size mismatch in %s.', builderPaths{builderIndex}));
-                if builderIndex == 2
-                    coarseCfg = prepareCoarseSensitivityCfg(cfg, 4);
-                    testCase.verifyEqual([coarseCfg.Nx coarseCfg.Ny], [100 100]);
-                    testCase.verifyEqual(coarseCfg.dt, 4 * cfg.dt, RelTol=1e-12);
-                    testCase.verifyEqual(coarseCfg.Nt, 150);
-                    testCase.verifyEqual(size(coarseCfg.source.samples), ...
-                        [cfg.antennas.numAntennas coarseCfg.Nt]);
-                end
             end
         end
     end
