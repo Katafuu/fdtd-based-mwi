@@ -1,4 +1,4 @@
-# PolitoCode
+# FDTD-Based MWI
 
 This repository contains a two-dimensional TMz FDTD forward solver and MATLAB inverse-problem workflows.
 
