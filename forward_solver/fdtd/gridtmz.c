@@ -18,7 +18,6 @@ static void gridSetConfig(Grid *g, const SimConfig *cfg) {
   SizeZ = cfg->sizeZ;
   Time = 0;
   NtG(g) = cfg->Nt;
-  g->solverThreads = 1;
   Dx = cfg->dx;
   Dy = cfg->dy;
   Dt = cfg->dt;

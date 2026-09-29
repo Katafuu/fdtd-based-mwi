@@ -19,5 +19,3 @@
 /inverse_problem/algorithms/transmission_mwi/results/
 
 /.agents/
-/inverse_problem/algorithms/fbts/results/
-/forward_solver/mex/*build_info.mat

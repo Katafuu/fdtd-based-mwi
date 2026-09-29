@@ -35,7 +35,6 @@ struct Grid {
    double *ez, *ceze, *cezh;
    int Nx, Ny, sizeZ;
    int time, Nt;
-   int solverThreads; /* per-solve CPU parallelism; independent of MATLAB pools */
    int type;
    double sourceFreq; // retained for the separate TFSF implementation
    double cdtds; // Courant number

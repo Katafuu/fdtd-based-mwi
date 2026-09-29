@@ -482,8 +482,7 @@ classdef fdtdMexSourcesTest < matlab.unittest.TestCase
 
             testFolder = fileparts(mfilename('fullpath'));
             solverRoot = fileparts(testFolder);
-            executable = getenv('FDTD_STANDALONE_EXECUTABLE');
-            if isempty(executable), executable = fullfile(solverRoot, 'tmzdemo2.exe'); end
+            executable = fullfile(solverRoot, 'tmzdemo2.exe');
             inputFolder = tempname;
             mkdir(inputFolder);
             cleanup = onCleanup(@() rmdir(inputFolder, 's'));

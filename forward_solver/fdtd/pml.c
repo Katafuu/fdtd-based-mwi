@@ -232,24 +232,12 @@ void pmlUpdateH(Grid *g) {
     pmlInitCoefficients(g);
   pmlPrintDiagnostics(g);
 
-  #ifdef _OPENMP
-
-  #pragma omp parallel for private(nn) schedule(static) num_threads(g->solverThreads) if(g->solverThreads > 1)
-
-  #endif
-
   for (mm = 0; mm < NxG(g); mm++) {
     for (nn = 0; nn < NyG(g) - 1; nn++) {
       upd_psi_hx_y(g, mm, nn);
       Hx(mm, nn) -= (Dt / (Mu0 * Murx(mm, nn))) * PsiHxY(mm, nn);
     }
   }
-
-  #ifdef _OPENMP
-
-  #pragma omp parallel for private(nn) schedule(static) num_threads(g->solverThreads) if(g->solverThreads > 1)
-
-  #endif
 
   for (mm = 0; mm < NxG(g) - 1; mm++) {
     for (nn = 0; nn < NyG(g); nn++) {
@@ -267,12 +255,6 @@ void pmlUpdateE(Grid *g) {
 
   if (!g->pml.coefficientsInitialized)
     pmlInitCoefficients(g);
-
-  #ifdef _OPENMP
-
-  #pragma omp parallel for private(nn) schedule(static) num_threads(g->solverThreads) if(g->solverThreads > 1)
-
-  #endif
 
   for (mm = 1; mm < NxG(g) - 1; mm++) {
     for (nn = 1; nn < NyG(g) - 1; nn++) {
