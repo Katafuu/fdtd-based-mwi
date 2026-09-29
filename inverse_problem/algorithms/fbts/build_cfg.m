@@ -1,5 +1,5 @@
 % build_cfg Construct the lossless FBTS FDTD configuration.
-% Run this script immediately before fbts.m.
+% Run this script from main.m before runFbts.m.
 
 %% Repository / path setup
 scriptPath = mfilename('fullpath');
@@ -34,34 +34,20 @@ eps0 = 8.854187817e-12;
 mu0 = 4*pi*1e-7;
 c0 = 1/sqrt(mu0*eps0);
 
-%% Random target controls
-randomSeed = [];
-targetOpts = struct();
-targetOpts.numTargetsRange = [1 1];
-targetOpts.allowedShapes = "rectangle";
-targetOpts.radiusRange = [10 28];
-targetOpts.sideRange = [31 31];
-targetOpts.epsrRange = [2.5 6.0];
-targetOpts.condRange = [0 0];
-targetOpts.maxAttempts = 800;
-targetOpts.allowOverlap = false;
-if ~isempty(randomSeed)
-    rng(randomSeed);
-end
-
 %% Simulation parameters
 cfg = struct();
 cfg.c0 = 3e8;
 cfg.mu0 = 4*pi*1e-7;
 cfg.eps0 = 8.854e-12;
-cfg.Nx = 400;
-cfg.Ny = 400;
+cfg.Nx = 280;
+cfg.Ny = 280;
 cfg.sizeZ = 1;
 cfg.dx = 1e-3;
 cfg.dy = 1e-3;
 cfg.dt = 1 / (cfg.c0 * sqrt(1/cfg.dx^2 + 1/cfg.dy^2));
 cfg.deltaF = 1e9 / sqrt(2);
-cfg.Nt = ceil(1 / (cfg.dt * cfg.deltaF));
+cfg.Nt = max(ceil(1 / (cfg.dt * cfg.deltaF)), ...
+    ceil(6e-9 / cfg.dt) + 1);
 cfg.snapshotStart = 0;
 cfg.snapshotStride = 1;
 cfg.returnEz = true;
@@ -72,7 +58,7 @@ cfg.returnRxSignals = true;
 %% Grid
 cfg.grid = struct();
 cfg.grid.background = struct( ...
-    'epsr', 1.0, ...
+    'epsr', 45.0, ...
     'murx', 1.0, ...
     'mury', 1.0, ...
     'cond_e', 0.0, ...
@@ -84,17 +70,18 @@ highGrid = fdtdmat.createGrid(2 .* [cfg.Nx cfg.Ny], ...
 
 
 %% PML construction
-cfg.pml = fdtdpml.build_rectangularPML(cfg.grid, floor(cfg.Ny * 0.25), 6, ...
+pmlThickness = 40;
+cfg.pml = fdtdpml.build_rectangularPML(cfg.grid, pmlThickness, 6, ...
     -(6 + 1) * log(1e-60) / ...
     (2 * sqrt((cfg.mu0 * cfg.grid.background.murx) / ...
-    (cfg.eps0 * cfg.grid.background.epsr)) * floor(cfg.Ny * 0.25) * cfg.dx), 6.0);
+    (cfg.eps0 * cfg.grid.background.epsr)) * pmlThickness * cfg.dx), 6.0);
 cfg.pml.type = 'cpml';
 cfg.pml.enabled = true;
 cfg.pml.ax = 1.0;
 cfg.pml.ay = 1.0;
 cfg.pml.az = 1.0;
-cfg.pml.thicknessRatio = 0.25;
-cfg.pml.thickness = floor(cfg.Ny * cfg.pml.thicknessRatio);
+cfg.pml.thicknessRatio = pmlThickness / cfg.Ny;
+cfg.pml.thickness = pmlThickness;
 cfg.pml.m = 6;
 cfg.pml.R = 1e-60;
 cfg.pml.kappaMax = 6.0;
@@ -112,7 +99,7 @@ cfg.antennas = struct();
 cfg.antennas.numAntennas = 8;
 cfg.antennas.txAntennas = 1:cfg.antennas.numAntennas;
 cfg.antennas.pmlPadding = 5;
-cfg.antennas.focusPadding = 20;
+cfg.antennas.focusPadding = 19;
 cfg.antennas.center = [round(cfg.Nx/2), round(cfg.Ny/2)];
 cfg.antennas.xMin = cfg.pml.thickness + 1 + cfg.antennas.pmlPadding;
 cfg.antennas.xMax = cfg.Nx - cfg.pml.thickness - cfg.antennas.pmlPadding;
@@ -128,9 +115,43 @@ cfg = buildCircularAntennaArrayIdx(cfg);
 fprintf('Built circular array: Nant = %d, radius = %.1f cells.\n', ...
     cfg.antennas.numAntennas, cfg.antennas.radius);
 
-%% Random targets on the 2x material grid
-cfg.targets = generateRandomTargetSpecs( ...
-    cfg.grid, cfg.antennas.doiMask, targetOpts);
+%% Available centered targets on the 2x material grid
+targetMaterial = struct( ...
+    'epsr', 2.0, ...
+    'murx', 1.0, ...
+    'mury', 1.0, ...
+    'cond_e', 0.0, ...
+    'cond_m', 0.0);
+targetCenter = cfg.antennas.center;
+circleRadiusCells = 0.01 / cfg.dx;
+triangleSidePhysical = 0.017320508075688773;
+triangleHalfSideCells = triangleSidePhysical / (2 * cfg.dx);
+triangleHeightCells = sqrt(3) * triangleSidePhysical / (2 * cfg.dy);
+squareHalfWidthCells = 0.01 / cfg.dx;
+squareHalfHeightCells = 0.01 / cfg.dy;
+
+cfg.availableTargets = repmat(struct( ...
+    'mask', [], ...
+    'name', "", ...
+    'material', targetMaterial, ...
+    'properties', struct()), 1, 3);
+cfg.availableTargets(1).name = "circle";
+cfg.availableTargets(1).properties = struct( ...
+    'center', targetCenter, 'radius', circleRadiusCells);
+cfg.availableTargets(2).name = "triangle";
+cfg.availableTargets(2).properties = struct('vertices', [ ...
+    targetCenter(1), targetCenter(2) - 2 * triangleHeightCells / 3; ...
+    targetCenter(1) - triangleHalfSideCells, ...
+        targetCenter(2) + triangleHeightCells / 3; ...
+    targetCenter(1) + triangleHalfSideCells, ...
+        targetCenter(2) + triangleHeightCells / 3]);
+cfg.availableTargets(3).name = "square";
+cfg.availableTargets(3).properties = struct('bounds', [ ...
+    targetCenter(1) - squareHalfWidthCells, ...
+    targetCenter(1) + squareHalfWidthCells, ...
+    targetCenter(2) - squareHalfHeightCells, ...
+    targetCenter(2) + squareHalfHeightCells]);
+cfg.targets = cfg.availableTargets(1);
 
 for targetIdx = 1:numel(cfg.targets)
     target = cfg.targets(targetIdx);
@@ -143,7 +164,7 @@ for targetIdx = 1:numel(cfg.targets)
                 10 * eps(max([abs(centerPhysical), radiusPhysical]));
             highGridTarget = fdtdgeom.shape_circle(highGrid, ...
                 centerPhysical, radiusPhysical, 'physical');
-        case "rectangle"
+        case "square"
             bounds = target.properties.bounds;
             physicalBounds = [ ...
                 (bounds(1) - 1) * cfg.dx, (bounds(2) - 1) * cfg.dx, ...
@@ -163,6 +184,8 @@ for targetIdx = 1:numel(cfg.targets)
             error('build_cfg:UnsupportedTargetShape', ...
                 'Unsupported target shape "%s".', target.name);
     end
+    cfg.targets(targetIdx).mask = highGridTarget.mask( ...
+        1:2:(2*cfg.Nx - 1), 1:2:(2*cfg.Ny - 1));
     highGrid = fdtdmat.applyRegion( ...
         highGrid, highGridTarget, target.material);
 end
@@ -178,9 +201,9 @@ targetTable = table(targetName, targetEpsr, targetCondE, ...
     'VariableNames', {'Name', 'EpsR', 'CondE'});
 disp(targetTable);
 
-% fbts.m defines the paper pulse and activates one transmitter per run.
+% runFbts.m defines the paper pulse and activates one transmitter per run.
 cfg.source = struct();
 cfg.source.location = cfg.antennas.pos;
 cfg.source.samples = zeros(cfg.antennas.numAntennas, cfg.Nt);
 
-% Algorithm controls are declared directly in fbts.m.
+% Algorithm controls are declared directly in runFbts.m.

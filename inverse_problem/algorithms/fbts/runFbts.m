@@ -1,11 +1,11 @@
-% fbts Reconstruct lossless relative permittivity from Ez data by FBTS.
-% Run build_cfg.m immediately before this script.
+function [results, cfg] = runFbts(cfg)
+%runFbts Reconstruct lossless relative permittivity from Ez data by FBTS.
 
 assert(exist('cfg', 'var') == 1 && isstruct(cfg), ...
-    'fbts:MissingConfig', 'Run build_cfg.m before fbts.m.');
+    'fbts:MissingConfig', 'Run build_cfg.m before runFbts.');
 assert(exist('fdtd_mex', 'file') == 3, ...
     'fbts:MissingFdtdMex', ...
-    'Build forward_solver/mex/fdtd_mex before running fbts.m.');
+    'Build forward_solver/mex/fdtd_mex before running runFbts.');
 
 %% Paper source pulse and inversion setup
 time = (0:cfg.Nt-1) .* cfg.dt;
@@ -285,9 +285,9 @@ fprintf('Average FBTS iteration runtime: %.3f seconds.\n', averageRuntime);
 results = struct();
 results.epsr_true = epsrTrue;
 results.epsr_est = epsrEst;
-results.gradient_epsr = projectedGradEpsr;
-results.raw_gradient_epsr = gradEpsr;
-results.direction_epsr = directionEpsr;
+% results.gradient_epsr = projectedGradEpsr;
+% results.raw_gradient_epsr = gradEpsr;
+% results.direction_epsr = directionEpsr;
 results.cost = costHistory;
 results.alpha = alphaHistory;
 results.pr_beta = prBetaHistory;
@@ -311,66 +311,4 @@ results.doi_mask = doiMask;
 results.Ez_measured = EzMeasured;
 results.Ez_model = EzModel;
 results.Ez_sensitivity = EzSensitivity;
-
-scriptPath = mfilename('fullpath');
-if isempty(scriptPath)
-    scriptDir = pwd;
-else
-    scriptDir = fileparts(scriptPath);
-end
-runOutputDirectory = createNextRunDirectory(fullfile(scriptDir, 'figs'));
-figureFiles = [ ...
-    string(fullfile(runOutputDirectory, ...
-        '01_true_relative_permittivity.png'))
-    string(fullfile(runOutputDirectory, ...
-        '02_estimated_relative_permittivity.png'))
-    string(fullfile(runOutputDirectory, ...
-        '03_relative_error_convergence.png'))
-    string(fullfile(runOutputDirectory, ...
-        '04_cost_convergence.png'))
-];
-resultFile = string(fullfile(runOutputDirectory, 'fbts_run_data.mat'));
-results.output_directory = string(runOutputDirectory);
-results.output_files = struct( ...
-    'figures', figureFiles, ...
-    'mat_file', resultFile);
-
-plot_fbts;
-save(char(resultFile), 'cfg', 'results', '-v7.3');
-fprintf('Saved FBTS figures and run data under %s.\n', ...
-    runOutputDirectory);
-
-function runDirectory = createNextRunDirectory(outputRoot)
-outputRoot = char(outputRoot);
-if ~isfolder(outputRoot)
-    [created, message] = mkdir(outputRoot);
-    if ~created
-        error('fbts:CreateOutputRootFailed', '%s', message);
-    end
-end
-
-existingRuns = dir(fullfile(outputRoot, 'run_*'));
-existingRuns = existingRuns([existingRuns.isdir]);
-runNumbers = nan(numel(existingRuns), 1);
-numMatchedRuns = 0;
-for directoryIndex = 1:numel(existingRuns)
-    token = regexp(existingRuns(directoryIndex).name, ...
-        '^run_(\d+)$', 'tokens', 'once');
-    if ~isempty(token)
-        numMatchedRuns = numMatchedRuns + 1;
-        runNumbers(numMatchedRuns) = str2double(token{1});
-    end
-end
-runNumbers = runNumbers(1:numMatchedRuns);
-if isempty(runNumbers)
-    nextRunNumber = 1;
-else
-    nextRunNumber = max(runNumbers) + 1;
-end
-
-runDirectory = fullfile(outputRoot, sprintf('run_%04d', nextRunNumber));
-[created, message] = mkdir(runDirectory);
-if ~created
-    error('fbts:CreateRunDirectoryFailed', '%s', message);
-end
 end
