@@ -1,56 +1,232 @@
-% main Run one FBTS reconstruction and save its MATLAB data.
+% main Run the FBTS target, position, and antenna-layout batch.
 mainTimer = tic;
 scriptDir = fileparts(mfilename('fullpath'));
 run(fullfile(scriptDir, 'build_cfg.m'));
-[results, cfg] = runFbts(cfg);
+run(fullfile(scriptDir, 'gen_combinatorial_scenarios.m'));
+baseCfg = cfg;
 
-runOutputDirectory = createNextRunDirectory(fullfile(scriptDir, 'figs'));
-resultFile = string(fullfile(runOutputDirectory, 'fbts_run_data.mat'));
-results.output_directory = string(runOutputDirectory);
-results.output_files = struct('mat_file', resultFile);
+assert(exist('fdtd_mex', 'file') == 3, ...
+    'fbts:MissingFdtdMex', ...
+    'Build forward_solver/mex/fdtd_mex before running main.');
 
-writeTimer = tic;
-save_results(resultFile, cfg, results);
-writeTime = toc(writeTimer);
-fileInfo = dir(char(resultFile));
-totalExecutionTime = toc(mainTimer);
-fprintf('Saved FBTS run data under %s.\n', runOutputDirectory);
-fprintf('Total execution time: %.3f seconds.\n', totalExecutionTime);
-fprintf('MAT write time: %.3f seconds.\n', writeTime);
-fprintf('MAT file size: %d bytes (%.3f MiB).\n', ...
-    fileInfo.bytes, fileInfo.bytes / 2^20);
-
-function runDirectory = createNextRunDirectory(outputRoot)
-outputRoot = char(outputRoot);
-if ~isfolder(outputRoot)
-    [created, message] = mkdir(outputRoot);
+batchOutputDir = fullfile(scriptDir, 'batch_output');
+if ~isfolder(batchOutputDir)
+    [created, message] = mkdir(batchOutputDir);
     if ~created
-        error('fbts:CreateOutputRootFailed', '%s', message);
+        error('fbts:CreateBatchOutputFailed', '%s', message);
     end
 end
 
-existingRuns = dir(fullfile(outputRoot, 'run_*'));
-existingRuns = existingRuns([existingRuns.isdir]);
-runNumbers = nan(numel(existingRuns), 1);
-numMatchedRuns = 0;
-for directoryIndex = 1:numel(existingRuns)
-    token = regexp(existingRuns(directoryIndex).name, ...
-        '^run_(\d+)$', 'tokens', 'once');
-    if ~isempty(token)
-        numMatchedRuns = numMatchedRuns + 1;
-        runNumbers(numMatchedRuns) = str2double(token{1});
+numTargets = numel(baseCfg.availableTargets);
+numPositions = size(targetPositions, 1);
+numAntennas = baseCfg.antennas.numAntennas;
+numLayouts = sum(cellfun(@(rows) size(rows, 1), antennaOffConfigs));
+numCases = numTargets * numPositions * numLayouts;
+pairIndices = zeros(numCases, 1);
+disabledByCase = cell(numCases, 1);
+resultFiles = cell(numCases, 1);
+reservedPaths = containers.Map('KeyType', 'char', 'ValueType', 'logical');
+
+caseIndex = 0;
+for targetIndex = 1:numTargets
+    for positionIndex = 1:numPositions
+        pairIndex = (targetIndex - 1) * numPositions + positionIndex;
+        for offCount = 0:numAntennas-1
+            layouts = antennaOffConfigs{offCount + 1};
+            for layoutIndex = 1:size(layouts, 1)
+                caseIndex = caseIndex + 1;
+                disabled = layouts(layoutIndex, :);
+                pairIndices(caseIndex) = pairIndex;
+                disabledByCase{caseIndex} = disabled;
+                if isempty(disabled)
+                    disabledLabel = 'all-on';
+                else
+                    disabledLabel = strjoin(string(disabled), '-');
+                end
+                baseName = sprintf('fbts_%s_%d_%s', ...
+                    char(baseCfg.availableTargets(targetIndex).name), ...
+                    positionIndex, char(disabledLabel));
+                resultFiles{caseIndex} = nextResultPath( ...
+                    batchOutputDir, baseName, reservedPaths);
+            end
+        end
     end
 end
-runNumbers = runNumbers(1:numMatchedRuns);
-if isempty(runNumbers)
-    nextRunNumber = 1;
+
+% The intended batch machine is a single Windows server.
+if ~ispc
+    error('fbts:WindowsMemoryRequired', ...
+        'Worker sizing requires the Windows memory function.');
+end
+[~, systemMemory] = memory;
+availableBytes = systemMemory.PhysicalMemory.Available;
+bytesPerWorker = 12 * 2^30;
+ramWorkerLimit = floor(0.75 * availableBytes / bytesPerWorker);
+if ramWorkerLimit < 1
+    error('fbts:InsufficientRAM', ...
+        'Available physical RAM is below the reserved 12 GiB worker budget.');
+end
+
+% One complete transmitter/receiver measurement set per target and position.
+pairCfgs = cell(numTargets * numPositions, 1);
+pairMeasurements = cell(numTargets * numPositions, 1);
+measurementTimer = tic;
+for targetIndex = 1:numTargets
+    for positionIndex = 1:numPositions
+        pairIndex = (targetIndex - 1) * numPositions + positionIndex;
+        pairCfgs{pairIndex} = configureTarget( ...
+            baseCfg, targetIndex, targetPositions(positionIndex, :));
+        pairMeasurements{pairIndex} = generateMeasurements(pairCfgs{pairIndex});
+        fprintf('Measured target %d/%d, position %d/%d.\n', ...
+            targetIndex, numTargets, positionIndex, numPositions);
+    end
+end
+measurementTime = toc(measurementTimer);
+
+processCluster = parcluster('Processes');
+workerCount = min([ramWorkerLimit, processCluster.NumWorkers, numCases]);
+existingPool = gcp('nocreate');
+if isempty(existingPool)
+    parpool('Processes', workerCount);
+elseif isa(existingPool, 'parallel.ProcessPool')
+    workerCount = min(workerCount, existingPool.NumWorkers);
 else
-    nextRunNumber = max(runNumbers) + 1;
+    error('fbts:ProcessPoolRequired', ...
+        'The existing parallel pool must use process workers.');
+end
+fprintf('Using %d process workers for %d FBTS cases.\n', ...
+    workerCount, numCases);
+fprintf('Shared synthetic measurement time: %.3f seconds.\n', ...
+    measurementTime);
+
+caseTime = zeros(numCases, 1);
+writeTime = zeros(numCases, 1);
+fileBytes = zeros(numCases, 1);
+parfor (caseIndex = 1:numCases, workerCount)
+    caseTimer = tic;
+    pairIndex = pairIndices(caseIndex);
+    disabled = disabledByCase{caseIndex};
+    active = setdiff(1:numAntennas, disabled, 'stable');
+    caseCfg = pairCfgs{pairIndex};
+    fullMeasurements = pairMeasurements{pairIndex};
+    EzMeasured = fullMeasurements(active, active, :);
+
+    caseCfg.antennas.pos = caseCfg.antennas.pos(active, :);
+    caseCfg.antennas.numAntennas = numel(active);
+    caseCfg.antennas.txAntennas = 1:numel(active);
+    caseCfg.source.location = caseCfg.antennas.pos;
+    caseCfg.source.samples = zeros(numel(active), caseCfg.Nt);
+
+    [results, caseCfg] = runFbts(caseCfg, EzMeasured);
+    resultFile = resultFiles{caseIndex};
+    results.output_directory = string(batchOutputDir);
+    results.output_files = struct('mat_file', string(resultFile));
+
+    writeTimer = tic;
+    save_results(resultFile, caseCfg, results);
+    writeTime(caseIndex) = toc(writeTimer);
+    fileInfo = dir(resultFile);
+    fileBytes(caseIndex) = fileInfo.bytes;
+    caseTime(caseIndex) = toc(caseTimer);
 end
 
-runDirectory = fullfile(outputRoot, sprintf('run_%04d', nextRunNumber));
-[created, message] = mkdir(runDirectory);
-if ~created
-    error('fbts:CreateRunDirectoryFailed', '%s', message);
+for caseIndex = 1:numCases
+    fprintf('Saved %s: case %.3f s, MAT write %.3f s, %d bytes.\n', ...
+        resultFiles{caseIndex}, caseTime(caseIndex), ...
+        writeTime(caseIndex), fileBytes(caseIndex));
+end
+fprintf('Whole-main execution time: %.3f seconds.\n', toc(mainTimer));
+
+function caseCfg = configureTarget(baseCfg, targetIndex, targetPosition)
+caseCfg = baseCfg;
+target = baseCfg.availableTargets(targetIndex);
+baseCenterPhysical = (baseCfg.antennas.center - 1) .* ...
+    [baseCfg.dx baseCfg.dy];
+offsetCells = (targetPosition - baseCenterPhysical) ./ ...
+    [baseCfg.dx baseCfg.dy];
+
+highGrid = fdtdmat.createGrid(2 .* [baseCfg.Nx baseCfg.Ny], ...
+    [baseCfg.dx/2 baseCfg.dy/2], baseCfg.grid.background, [0 0]);
+switch string(target.name)
+    case "circle"
+        target.properties.center = target.properties.center + offsetCells;
+        centerPhysical = (target.properties.center - 1) .* ...
+            [baseCfg.dx baseCfg.dy];
+        radiusPhysical = target.properties.radius * baseCfg.dx;
+        radiusPhysical = radiusPhysical + ...
+            10 * eps(max([abs(centerPhysical), radiusPhysical]));
+        highGridTarget = fdtdgeom.shape_circle( ...
+            highGrid, centerPhysical, radiusPhysical, 'physical');
+    case "triangle"
+        target.properties.vertices = target.properties.vertices + offsetCells;
+        physicalVertices = (target.properties.vertices - 1) .* ...
+            [baseCfg.dx baseCfg.dy];
+        highGridTarget = fdtdgeom.shape_polygon( ...
+            highGrid, physicalVertices, 'physical');
+    case "square"
+        target.properties.bounds = target.properties.bounds + ...
+            [offsetCells(1) offsetCells(1) offsetCells(2) offsetCells(2)];
+        bounds = target.properties.bounds;
+        physicalBounds = [ ...
+            (bounds(1) - 1) * baseCfg.dx, ...
+            (bounds(2) - 1) * baseCfg.dx, ...
+            (bounds(3) - 1) * baseCfg.dy, ...
+            (bounds(4) - 1) * baseCfg.dy];
+        boundsTolerance = 10 * eps(max(abs(physicalBounds)));
+        physicalBounds = physicalBounds + ...
+            [-boundsTolerance boundsTolerance ...
+            -boundsTolerance boundsTolerance];
+        highGridTarget = fdtdgeom.shape_rectangle( ...
+            highGrid, physicalBounds, 'physical');
+    otherwise
+        error('fbts:UnsupportedTargetShape', ...
+            'Unsupported target shape "%s".', target.name);
+end
+
+target.mask = highGridTarget.mask( ...
+    1:2:(2*baseCfg.Nx - 1), 1:2:(2*baseCfg.Ny - 1));
+caseCfg.targets = target;
+highGrid = fdtdmat.applyRegion( ...
+    highGrid, highGridTarget, target.material);
+caseCfg.grid.epsr = highGrid.epsr( ...
+    1:2:(2*baseCfg.Nx - 1), 1:2:(2*baseCfg.Ny - 1));
+caseCfg.grid.cond_e = highGrid.cond_e( ...
+    1:2:(2*baseCfg.Nx - 1), 1:2:(2*baseCfg.Ny - 1));
+caseCfg.grid.cond_m = highGrid.cond_m( ...
+    1:2:(2*baseCfg.Nx - 1), 1:2:(2*baseCfg.Ny - 1));
+end
+
+function EzMeasured = generateMeasurements(cfg)
+numAntennas = cfg.antennas.numAntennas;
+EzMeasured = zeros(numAntennas, numAntennas, cfg.Nt);
+measurementCfg = cfg;
+measurementCfg.returnEz = false;
+measurementCfg.returnHx = false;
+measurementCfg.returnHy = false;
+measurementCfg.returnRxSignals = true;
+sourcePulse = cfg.source.func((0:cfg.Nt-1) .* cfg.dt);
+for transmitter = 1:numAntennas
+    measurementCfg.source.samples(:) = 0;
+    measurementCfg.source.samples(transmitter, :) = sourcePulse;
+    measuredResult = fdtd_mex(measurementCfg);
+    EzMeasured(transmitter, :, :) = reshape( ...
+        measuredResult.rx_signals, 1, numAntennas, cfg.Nt);
+end
+end
+
+function resultFile = nextResultPath(outputDir, baseName, reservedPaths)
+suffix = 0;
+while true
+    if suffix == 0
+        fileName = [baseName '.mat'];
+    else
+        fileName = sprintf('%s(%d).mat', baseName, suffix);
+    end
+    resultFile = fullfile(outputDir, fileName);
+    if ~isfile(resultFile) && ~isKey(reservedPaths, resultFile)
+        reservedPaths(resultFile) = true;
+        return
+    end
+    suffix = suffix + 1;
 end
 end

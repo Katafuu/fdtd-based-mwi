@@ -96,7 +96,8 @@ cfg.pml.sigma_e = max(cfg.pml.condx, cfg.pml.condy);
 % One shared antenna list. Antenna tx acts as transmitter; all other
 % antennas are receivers for that tx.
 cfg.antennas = struct();
-cfg.antennas.numAntennas = 8;
+% Change this count to generate a different circular array and scenario set.
+cfg.antennas.numAntennas = 12;
 cfg.antennas.txAntennas = 1:cfg.antennas.numAntennas;
 cfg.antennas.pmlPadding = 5;
 cfg.antennas.focusPadding = 19;
@@ -201,9 +202,12 @@ targetTable = table(targetName, targetEpsr, targetCondE, ...
     'VariableNames', {'Name', 'EpsR', 'CondE'});
 disp(targetTable);
 
-% runFbts.m defines the paper pulse and activates one transmitter per run.
+% The paper pulse is shared by synthetic measurement generation and runFbts.
 cfg.source = struct();
 cfg.source.location = cfg.antennas.pos;
 cfg.source.samples = zeros(cfg.antennas.numAntennas, cfg.Nt);
+tau = 0.125e-9;
+cfg.source.func = @(t) ...
+    (4 .* t.^3 ./ tau.^4 - t.^4 ./ tau.^5) .* exp(-t ./ tau);
 
 % Algorithm controls are declared directly in runFbts.m.

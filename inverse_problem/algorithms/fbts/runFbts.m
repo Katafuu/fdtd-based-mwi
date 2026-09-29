@@ -1,4 +1,4 @@
-function [results, cfg] = runFbts(cfg)
+function [results, cfg] = runFbts(cfg, EzMeasured)
 %runFbts Reconstruct lossless relative permittivity from Ez data by FBTS.
 
 assert(exist('cfg', 'var') == 1 && isstruct(cfg), ...
@@ -9,18 +9,19 @@ assert(exist('fdtd_mex', 'file') == 3, ...
 
 %% Paper source pulse and inversion setup
 time = (0:cfg.Nt-1) .* cfg.dt;
-tau = 0.125e-9;
-cfg.source.func = @(t) ...
-    (4 .* t.^3 ./ tau.^4 - t.^4 ./ tau.^5) .* exp(-t ./ tau);
 sourcePulse = cfg.source.func(time);
 T = time(end);
 K = cos(pi .* time ./ (2 .* T));
 K(end) = 0;
 
-numIterations = 15;
+numIterations = 6;
 transmitters = cfg.antennas.txAntennas;
 numTransmitters = numel(transmitters);
 numReceivers = cfg.antennas.numAntennas;
+assert(isequal(size(EzMeasured), ...
+    [numTransmitters numReceivers cfg.Nt]), ...
+    'fbts:InvalidMeasurements', ...
+    'EzMeasured must be numTransmitters-by-numReceivers-by-Nt.');
 doiMask = logical(cfg.antennas.doiMask);
 
 epsrTrue = cfg.grid.epsr;
@@ -31,27 +32,6 @@ epsrLowerBound = 1.0;
 [doiX, doiY] = find(doiMask);
 xRange = min(doiX):max(doiX);
 yRange = min(doiY):max(doiY);
-
-%% Synthetic measurements from the true material
-EzMeasured = zeros(numTransmitters, numReceivers, cfg.Nt);
-fprintf("Generating synthetic measurements\n");
-for transmitterIndex = 1:numTransmitters
-    transmitter = transmitters(transmitterIndex);
-    measurementCfg = cfg;
-    measurementCfg.returnEz = false;
-    measurementCfg.returnHx = false;
-    measurementCfg.returnHy = false;
-    measurementCfg.returnRxSignals = true;
-    measurementCfg.source.samples(:) = 0;
-    measurementCfg.source.samples(transmitter, :) = sourcePulse;
-    measuredResult = fdtd_mex(measurementCfg);
-    EzMeasured(transmitterIndex, :, :) = reshape( ...
-        measuredResult.rx_signals, 1, numReceivers, cfg.Nt);
-
-    clear measuredResult
-    fprintf('Measured transmitter %d / %d.\n', ...
-        transmitterIndex, numTransmitters);
-end
 
 %% Forward-backward inversion
 costHistory = zeros(numIterations, 1);
