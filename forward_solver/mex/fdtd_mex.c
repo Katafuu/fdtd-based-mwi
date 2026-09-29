@@ -9,6 +9,10 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+#ifdef FDTD_CUDA
+#include "gpu/mxGPUArray.h"
+#include "../fdtd/cuda_solver.h"
+#endif
 
 typedef struct {
   mxArray *resultStruct;
@@ -25,6 +29,7 @@ typedef struct {
   int returnHx;
   int returnHy;
   int returnRxSignals;
+  int ezX, ezY, ezNx, ezNy;
   const SimConfig *cfg;
 } MexOutputBuffer;
 
@@ -479,20 +484,49 @@ static void copyCanonicalField(mxArray *dst, const double *src,
           src[(size_t)row * (size_t)cols + (size_t)col];
 }
 
+static void parseEzRegion(MexOutputBuffer *buf, const mxArray *input,
+                          const SimConfig *cfg, int positional) {
+  const mxArray *region = getField(input, "ezRegion");
+  const double *r;
+  int i;
+  buf->ezX = 0; buf->ezY = 0; buf->ezNx = cfg->Nx; buf->ezNy = cfg->Ny;
+  if (positional || region == NULL || mxIsEmpty(region)) return;
+  if (!mxIsDouble(region) || mxIsComplex(region) || mxGetNumberOfElements(region) != 4)
+    mexErrMsgIdAndTxt("fdtd_mex:InvalidEzRegion", "ezRegion must be [xmin xmax ymin ymax].");
+  r = mxGetPr(region);
+  for (i = 0; i < 4; i++)
+    if (!mxIsFinite(r[i]) || r[i] < 1 || r[i] != floor(r[i]))
+      mexErrMsgIdAndTxt("fdtd_mex:InvalidEzRegion", "ezRegion requires positive integer indices.");
+  if (r[0] > r[1] || r[2] > r[3] || r[1] > cfg->Nx || r[3] > cfg->Ny)
+    mexErrMsgIdAndTxt("fdtd_mex:InvalidEzRegion", "ezRegion is outside the simulation grid.");
+  buf->ezX = (int)r[0]-1; buf->ezY = (int)r[2]-1;
+  buf->ezNx = (int)(r[1]-r[0])+1; buf->ezNy = (int)(r[3]-r[2])+1;
+}
+
+static void copyEzRegion(MexOutputBuffer *buf, const Grid *g) {
+  double *dst = mxGetPr(buf->ez);
+  size_t offset = (size_t)buf->frame*buf->ezNx*buf->ezNy;
+  int x,y;
+  for (x = 0; x < buf->ezNx; x++)
+    for (y = 0; y < buf->ezNy; y++)
+      dst[offset+x+(size_t)y*buf->ezNx] =
+        g->ez[(size_t)(x+buf->ezX)*g->Ny+y+buf->ezY];
+}
+
 static int mexOutputBegin(OutputHandler *out, const Grid *grid,
                           const SimConfig *cfg) {
   MexOutputBuffer *buf = (MexOutputBuffer *)out->ctx;
   Grid *g = (Grid *)grid;
   const char *fields[] = {"Ez", "Hx", "Hy", "rx_signals", "Nx",
                           "Ny", "Nt", "snapshotStride", "dt", "dx",
-                          "dy"};
+                          "dy", "ezRegion"};
 
   buf->cfg = cfg;
   buf->frame = 0;
   buf->numFrames = frameCount(cfg);
 
   if (buf->returnEz)
-    buf->ez = createFieldArray(NxG(g), NyG(g), buf->numFrames);
+    buf->ez = createFieldArray(buf->ezNx, buf->ezNy, buf->numFrames);
   if (buf->returnHx)
     buf->hx = createFieldArray(NxG(g), NyG(g) - 1, buf->numFrames);
   if (buf->returnHy)
@@ -502,7 +536,12 @@ static int mexOutputBegin(OutputHandler *out, const Grid *grid,
         (mwSize)cfg->antennas.numAntennas, (mwSize)cfg->Nt, mxREAL);
 
   if (buf->asStruct && buf->nlhs > 0) {
-    buf->resultStruct = mxCreateStructMatrix(1, 1, 11, fields);
+    mxArray *region = mxCreateDoubleMatrix(1,4,mxREAL);
+    double *r = mxGetPr(region);
+    r[0] = buf->ezX+1; r[1] = buf->ezX+buf->ezNx;
+    r[2] = buf->ezY+1; r[3] = buf->ezY+buf->ezNy;
+    buf->resultStruct = mxCreateStructMatrix(1, 1, 12, fields);
+    mxSetField(buf->resultStruct, 0, "ezRegion", region);
     mxSetField(buf->resultStruct, 0, "Ez", buf->ez != NULL ? buf->ez : mxCreateDoubleMatrix(0, 0, mxREAL));
     mxSetField(buf->resultStruct, 0, "Hx", buf->hx != NULL ? buf->hx : mxCreateDoubleMatrix(0, 0, mxREAL));
     mxSetField(buf->resultStruct, 0, "Hy", buf->hy != NULL ? buf->hy : mxCreateDoubleMatrix(0, 0, mxREAL));
@@ -553,7 +592,7 @@ static int mexOutputRecord(OutputHandler *out, const Grid *grid, int timeStep) {
     return 1;
 
   if (buf->ez != NULL)
-    copyCanonicalField(buf->ez, g->ez, NxG(g), NyG(g), buf->frame);
+    copyEzRegion(buf, g);
   if (buf->hx != NULL)
     copyCanonicalField(buf->hx, g->hx, NxG(g), NyG(g) - 1, buf->frame);
   if (buf->hy != NULL)
@@ -598,6 +637,10 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
   MexInitialState initialState;
   MexOwnedBuffers ownedBuffers;
   int tr = 0;
+  int solverThreads = 1;
+#ifdef FDTD_CUDA
+  mxInitGPU();
+#endif
 
   if (nrhs < 1 || nrhs > 2)
     mexErrMsgIdAndTxt("fdtd_mex:InvalidInput",
@@ -610,6 +653,12 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
   simConfigDefaults(&cfg);
   memset(&ownedBuffers, 0, sizeof(ownedBuffers));
   parseMexConfig(&cfg, &ownedBuffers, prhs[0]);
+  if (getField(prhs[0], "solverThreads") != NULL)
+    solverThreads = getRequiredPositiveIntField(prhs[0], "solverThreads");
+#if !defined(_OPENMP) && !defined(FDTD_CUDA)
+  if (solverThreads != 1)
+    mexErrMsgIdAndTxt("fdtd_mex:OpenMPUnavailable", "Rebuild with OpenMP to request multiple solver threads.");
+#endif
   parseMexInitialState(&initialState, &ownedBuffers, prhs[0], cfg.Nx, cfg.Ny);
 
   if (nlhs == 0) {
@@ -624,14 +673,16 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
     cfg.returnRxSignals = 0;
   }
 
+  memset(&mexOut, 0, sizeof(mexOut));
+  parseEzRegion(&mexOut, prhs[0], &cfg, nlhs > 1);
   g = gridCreate(&cfg);
   if (g == NULL) {
     releaseOwnedBuffers(&ownedBuffers);
     mexErrMsgIdAndTxt("fdtd_mex:GridInit", "Could not initialize FDTD grid.");
   }
   applyMexInitialState(g, &initialState);
+  g->solverThreads = solverThreads;
 
-  memset(&mexOut, 0, sizeof(mexOut));
   mexOut.asStruct = nlhs <= 1;
   mexOut.nlhs = nlhs;
   mexOut.plhs = plhs;
@@ -641,10 +692,28 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[]) {
   mexOut.returnRxSignals = cfg.returnRxSignals;
 
   mexOutputInit(&out, &mexOut, g, &cfg);
+#ifdef FDTD_CUDA
+  {
+    CudaOutputs outputs;
+    char error[1024];
+    mexOutputBegin(&out,g,&cfg);
+    outputs.ez = mexOut.ez ? mxGetPr(mexOut.ez) : NULL;
+    outputs.hx = mexOut.hx ? mxGetPr(mexOut.hx) : NULL;
+    outputs.hy = mexOut.hy ? mxGetPr(mexOut.hy) : NULL;
+    outputs.rx = mexOut.rxSignals ? mxGetPr(mexOut.rxSignals) : NULL;
+    outputs.x = mexOut.ezX; outputs.y = mexOut.ezY;
+    outputs.nx = mexOut.ezNx; outputs.ny = mexOut.ezNy; outputs.frames = mexOut.numFrames;
+    if (!fdtdRunCuda(g,&cfg,tr,&outputs,error,sizeof(error))) {
+      gridDestroy(g); releaseOwnedBuffers(&ownedBuffers);
+      mexErrMsgIdAndTxt("fdtd_cuda:ExecutionFailed","%s",error);
+    }
+  }
+#else
   if (tr)
     fdtdRunTr(g, &cfg, &out);
   else
     fdtdRun(g, &cfg, &out);
+#endif
 
   gridDestroy(g);
   releaseOwnedBuffers(&ownedBuffers);

@@ -292,14 +292,14 @@ for targetIndex = 1:numel(oldTargets)
             if isfield(properties, 'radius')
                 properties.radius = properties.radius * oldSpec.dx / newSpec.dx;
             end
-        case 'rectangle'
+        case {'rectangle','square'}
             if isfield(properties, 'bounds') && numel(properties.bounds) == 4
                 bounds = double(properties.bounds(:).');
                 xBounds = (bounds(1:2) - 1) * oldSpec.dx / newSpec.dx + 1;
                 yBounds = (bounds(3:4) - 1) * oldSpec.dy / newSpec.dy + 1;
                 properties.bounds = [xBounds yBounds];
             end
-        case 'triangle'
+        case {'triangle','hexagon','polygon'}
             if isfield(properties, 'vertices')
                 properties.vertices = mapIndexCoordinates( ...
                     properties.vertices, oldSpec, newSpec, false);

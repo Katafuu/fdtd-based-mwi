@@ -5,7 +5,7 @@ exampleDir = fileparts(mfilename('fullpath'));
 if isempty(exampleDir)
     exampleDir = pwd;
 end
-solverRoot = fileparts("C:\Users\Galax\Desktop\PolitoCode");
+solverRoot = fileparts(exampleDir);
 workspaceRoot = fileparts(solverRoot);
 addpath(fullfile(workspaceRoot, 'buildLib')); %[output:87113aab]
 resultsDir = fullfile(solverRoot, 'results');
