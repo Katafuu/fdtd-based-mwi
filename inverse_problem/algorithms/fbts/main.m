@@ -5,9 +5,7 @@ run(fullfile(scriptDir, 'build_cfg.m'));
 run(fullfile(scriptDir, 'gen_combinatorial_scenarios.m'));
 baseCfg = cfg;
 
-assert(exist('fdtd_mex', 'file') == 3, ...
-    'fbts:MissingFdtdMex', ...
-    'Build forward_solver/mex/fdtd_mex before running main.');
+ensureFdtdMex(workspaceRoot);
 
 batchOutputDir = fullfile(scriptDir, 'batch_output');
 if ~isfolder(batchOutputDir)
@@ -73,12 +71,14 @@ pairMeasurements = cell(numTargets * numPositions, 1);
 measurementTimer = tic;
 for targetIndex = 1:numTargets
     for positionIndex = 1:numPositions
+        pairTimer = tic;
         pairIndex = (targetIndex - 1) * numPositions + positionIndex;
         pairCfgs{pairIndex} = configureTarget( ...
             baseCfg, targetIndex, targetPositions(positionIndex, :));
         pairMeasurements{pairIndex} = generateMeasurements(pairCfgs{pairIndex});
-        fprintf('Measured target %d/%d, position %d/%d.\n', ...
-            targetIndex, numTargets, positionIndex, numPositions);
+        fprintf('Measured target %d/%d, position %d/%d in %.3f s.\n', ...
+            targetIndex, numTargets, positionIndex, numPositions, ...
+            toc(pairTimer));
     end
 end
 measurementTime = toc(measurementTimer);
@@ -99,9 +99,11 @@ fprintf('Using %d process workers for %d FBTS cases.\n', ...
 fprintf('Shared synthetic measurement time: %.3f seconds.\n', ...
     measurementTime);
 
-caseTime = zeros(numCases, 1);
-writeTime = zeros(numCases, 1);
-fileBytes = zeros(numCases, 1);
+progressQueue = parallel.pool.DataQueue;
+afterEach(progressQueue, @(info) fprintf( ...
+    'Completed case %d/%d (%s): full run %.3f s, MAT write %.3f s, %d bytes.\n', ...
+    info.index, numCases, info.file, info.caseTime, ...
+    info.writeTime, info.fileBytes));
 parfor (caseIndex = 1:numCases, workerCount)
     caseTimer = tic;
     pairIndex = pairIndices(caseIndex);
@@ -124,18 +126,29 @@ parfor (caseIndex = 1:numCases, workerCount)
 
     writeTimer = tic;
     save_results(resultFile, caseCfg, results);
-    writeTime(caseIndex) = toc(writeTimer);
+    writeTime = toc(writeTimer);
     fileInfo = dir(resultFile);
-    fileBytes(caseIndex) = fileInfo.bytes;
-    caseTime(caseIndex) = toc(caseTimer);
+    caseTime = toc(caseTimer);
+    send(progressQueue, struct( ...
+        'index', caseIndex, 'file', resultFile, ...
+        'caseTime', caseTime, 'writeTime', writeTime, ...
+        'fileBytes', fileInfo.bytes));
 end
 
-for caseIndex = 1:numCases
-    fprintf('Saved %s: case %.3f s, MAT write %.3f s, %d bytes.\n', ...
-        resultFiles{caseIndex}, caseTime(caseIndex), ...
-        writeTime(caseIndex), fileBytes(caseIndex));
-end
 fprintf('Whole-main execution time: %.3f seconds.\n', toc(mainTimer));
+
+function ensureFdtdMex(workspaceRoot)
+if exist('fdtd_mex', 'file') == 3
+    return
+end
+fprintf('FDTD MEX not found; building it for this platform.\n');
+run(fullfile(workspaceRoot, 'forward_solver', 'mex', ...
+    'build_fdtd_mex.m'));
+rehash;
+assert(exist('fdtd_mex', 'file') == 3, ...
+    'fbts:MissingFdtdMex', ...
+    'The FDTD MEX build completed, but fdtd_mex is not on the MATLAB path.');
+end
 
 function caseCfg = configureTarget(baseCfg, targetIndex, targetPosition)
 caseCfg = baseCfg;
