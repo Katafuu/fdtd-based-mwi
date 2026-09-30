@@ -18,4 +18,6 @@
 /inverse_problem/algorithms/time_reversal/*.mp4
 /inverse_problem/algorithms/transmission_mwi/results/
 
+**/figs/
+
 /.agents/

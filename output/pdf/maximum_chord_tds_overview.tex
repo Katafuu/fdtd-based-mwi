@@ -1,0 +1,62 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.45em}
+
+\title{Maximum-Chord Transmission-Delay Estimation in 2D}
+\author{Brief mathematical overview of \texttt{tds\_verification}}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.7em}
+
+\section*{Motivation and required support}
+Bourqui and Fear estimate bulk breast-tissue permittivity from the extra transit time of a microwave pulse measured with tissue present versus a reference measurement without it \cite{bourqui2016}. Our numerical adaptation uses a two-dimensional FDTD cross-section and a circular antenna array. For each transmitter--receiver pair, we compare a target simulation with a background-only simulation. Unlike the paper's footprint-based property map, the method described here estimates one relative permittivity for a \emph{homogeneous} target and then fills its spatial support with that value.
+
+The algorithm requires a binary support image $M(\mathbf{x})\in\{0,1\}$ on the FDTD grid: $M=1$ inside the target and $M=0$ outside. The current \texttt{tds\_verification} study supplies the exact target mask as an oracle; a future hybrid method would substitute an estimated mask. Neither version needs the true target permittivity as an inversion input.
+
+\section*{Transmission delay and permittivity}
+For a nonmagnetic medium, using an effective, weak-loss refractive index $n\simeq\sqrt{\epsilon_r}$, the propagation speed is $v\simeq c_0/n$. Let $D_i$ be the separation of antenna pair $i$, $n_b=\sqrt{\epsilon_{r,b}}$ the background index, and $n_t=\sqrt{\epsilon_{r,t}}$ the unknown homogeneous target index. The length of the straight antenna-to-antenna segment inside the support is
+\begin{equation}
+ L_i=\int_{\gamma_i}M(\mathbf{x})\,\mathrm{d}s.
+\end{equation}
+Under the straight-path approximation, the target and reference transit times differ by
+\begin{equation}
+ \Delta t_i=t_i^{\mathrm{target}}-t_i^{\mathrm{ref}}
+ \simeq\frac{(D_i-L_i)n_b+L_i n_t-D_i n_b}{c_0}
+ =\frac{L_i}{c_0}(n_t-n_b).
+ \label{eq:delay}
+\end{equation}
+Thus a single usable path suggests $\epsilon_{r,t}\simeq(n_b+c_0\Delta t_i/L_i)^2$. If the entire antenna separation is target material ($L_i=D_i$) and the reference is air ($n_b=1$), this reduces to the bulk-delay expression used by Bourqui and Fear \cite{bourqui2016}. In this implementation, $\Delta t_i$ is obtained by aligning the Hilbert envelopes of the target and reference receiver pulses using a normalized lag score, followed by a small parabolic refinement of its peak; the paper itself used a peak-to-peak pulse delay.
+
+\newpage
+\section*{Maximum-chord estimate and reconstructed image}
+The code first forms the candidate set $\mathcal C$ of antenna pairs allowed by the $40^\circ$ off-boresight rule and having finite, nonnegative matched delays and $L_i>0$. Let $L_{\max}=\max_{i\in\mathcal C}L_i$. Only pairs in
+\begin{equation}
+ \mathcal{S}=\{i\in\mathcal C:L_i\geq0.999L_{\max}\}
+\end{equation}
+are used. The target's index contrast $\Delta n=n_t-n_b$ is then the least-squares fit of $c_0\Delta t_i\simeq L_i\Delta n$ over those directed pairs:
+\begin{equation}
+ \widehat{\Delta n}
+ =\underset{q}{\arg\min}\sum_{i\in\mathcal S}(c_0\Delta t_i-L_iq)^2
+ =\frac{\sum_{i\in\mathcal S}L_i(c_0\Delta t_i)}
+        {\sum_{i\in\mathcal S}L_i^2},
+ \qquad
+ \widehat{\epsilon}_{r,t}=(n_b+\widehat{\Delta n})^2.
+ \label{eq:fit}
+\end{equation}
+Finally, $\widehat{\epsilon}_r(\mathbf{x})=\epsilon_{r,b}+(\widehat{\epsilon}_{r,t}-\epsilon_{r,b})M(\mathbf{x})$. This is a support-constrained, homogeneous image, not a pixelwise inversion of material variation.
+
+\section*{Why use long crossings?}
+Averaging separate estimates from every intersecting pair gives large influence to paths that only clip the target boundary. The single-path formula divides by $L_i$, so a small crossing amplifies both delay error and support-boundary error: $\delta(\Delta n_i)\approx(c_0/L_i)\delta(\Delta t_i)-(c_0\Delta t_i/L_i^2)\delta L_i$. Moreover, near an interface the measured field need not follow the assumed straight centerline: refraction, diffraction, edge effects, and pulse distortion can alter which arrival is matched \cite{tepe2017,bourqui2016}. Restricting the fit to the longest interior crossings reduces dependence on these grazing paths; it does not remove the straight-path approximation or guarantee robustness to an inaccurate support mask.
+
+\begin{thebibliography}{9}
+\bibitem{bourqui2016} J. Bourqui and E. C. Fear, ``System for Bulk Dielectric Permittivity Estimation of Breast Tissues at Microwave Frequencies,'' \emph{IEEE Transactions on Microwave Theory and Techniques}, vol. 64, no. 9, 2016. \href{https://doi.org/10.1109/TMTT.2016.2586486}{doi:10.1109/TMTT.2016.2586486}.
+\bibitem{tepe2017} J. Tepe, T. Schuster, and B. Littau, ``A modified algebraic reconstruction technique taking refraction into account with an application in terahertz tomography,'' \emph{Inverse Problems in Science and Engineering}, vol. 25, no. 10, pp. 1448--1473, 2017. \href{https://doi.org/10.1080/17415977.2016.1267168}{doi:10.1080/17415977.2016.1267168}.
+\end{thebibliography}
+
+\end{document}

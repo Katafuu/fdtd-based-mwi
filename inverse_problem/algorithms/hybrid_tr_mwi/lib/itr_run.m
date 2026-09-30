@@ -1,5 +1,13 @@
-function tr_result = itr_run(cfg)
+function tr_result = itr_run(cfg, SNR_dB)
 %itr_run Run iterative time reversal using a caller-supplied FDTD cfg.
+% Optional SNR_dB adds AWGN to the scattered receiver traces before TR.
+
+addReceiverNoise = nargin >= 2;
+if addReceiverNoise
+    validateattributes(SNR_dB, {'numeric'}, ...
+        {'real', 'scalar', 'finite'}, mfilename, 'SNR_dB');
+    receiverNoisePowers = zeros(cfg.opts.numIterations, 1);
+end
 
 %% Repository / path setup
 algorithmDir = fileparts(fileparts(mfilename('fullpath')));
@@ -81,6 +89,16 @@ for iterNum = 1:cfg.opts.numIterations
     incident_cfg.source.samples = tx_signal;
     result_inc = fdtd_mex(incident_cfg);
     rx_scat = computeScatteredReceivers(result_tot, result_inc);
+    if addReceiverNoise
+        signalPower = mean(rx_scat(:).^2);
+        noisePower = signalPower * 10^(-SNR_dB/10);
+        if ~isfinite(noisePower)
+            error('itr_run:InvalidNoisePower', ...
+                'The supplied SNR produces a nonfinite receiver noise power.');
+        end
+        receiverNoisePowers(iterNum) = noisePower;
+        rx_scat = rx_scat + sqrt(noisePower) .* randn(size(rx_scat));
+    end
     [tx_tr, ~] = prepareTracesForTR(rx_scat, cfg.dt, trace_opts);
 
     fprintf('Iteration %d/%d: time-reversal MEX propagation...\n', ...
@@ -110,6 +128,9 @@ end
 tr_result.focus_mag_image = focusFramesMag(:, :, end);
 tr_result.focus_entropy_image = focusFramesEntropy(:, :, end);
 tr_result.focusMagFrame = tr_result.focus_mag_Ez;
+if addReceiverNoise
+    tr_result.receiverNoisePowers = receiverNoisePowers;
+end
 end
 function result = analyzeTimeReversal(mexResult, focusMask, storeHistory, historyStride)
 %analyzeTimeReversal Compute focusing products from the complete MEX Ez history.
