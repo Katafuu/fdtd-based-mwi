@@ -51,13 +51,23 @@ for targetIndex = 1:numTargets
     end
 end
 
-% The intended batch machine is a single Windows server.
-if ~ispc
-    error('fbts:WindowsMemoryRequired', ...
-        'Worker sizing requires the Windows memory function.');
+% Size the process pool from available physical memory on the host.
+if ispc
+    [~, systemMemory] = memory;
+    availableBytes = systemMemory.PhysicalMemory.Available;
+elseif isunix && isfile('/proc/meminfo')
+    memInfo = fileread('/proc/meminfo');
+    availableKiB = regexp(memInfo, ...
+        'MemAvailable:\s+([0-9]+)\s+kB', 'tokens', 'once');
+    if isempty(availableKiB)
+        error('fbts:LinuxMemoryUnavailable', ...
+            'Could not read MemAvailable from /proc/meminfo.');
+    end
+    availableBytes = str2double(availableKiB{1}) * 1024;
+else
+    error('fbts:UnsupportedMemoryPlatform', ...
+        'Worker sizing requires Windows or Linux memory information.');
 end
-[~, systemMemory] = memory;
-availableBytes = systemMemory.PhysicalMemory.Available;
 bytesPerWorker = 12 * 2^30;
 ramWorkerLimit = floor(0.75 * availableBytes / bytesPerWorker);
 if ramWorkerLimit < 1
