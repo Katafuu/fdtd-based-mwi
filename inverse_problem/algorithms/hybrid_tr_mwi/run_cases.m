@@ -1,7 +1,8 @@
 % run_cases Build one shared cfg and run both headless focus-bias cases.
 
 controllerDir = fileparts(mfilename('fullpath'));
-run(fullfile(controllerDir, 'build_cfg.m'));
+addpath(controllerDir, '-begin');
+cfg = build_cfg(struct());
 
 caseRoots = {fullfile(controllerDir, 'figs')};
 existingRunNumbers = zeros(0, 1);

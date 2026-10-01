@@ -1,5 +1,5 @@
 classdef testConfigurationTimeSteps < matlab.unittest.TestCase
-    %testConfigurationTimeSteps Verify build scripts derive Nt from dt and deltaF.
+    %testConfigurationTimeSteps Verify builders derive Nt from dt and deltaF.
 
     methods (Test)
         function inverseProblemBuildersUseMinimumTimeStepFormula(testCase)
@@ -21,7 +21,12 @@ classdef testConfigurationTimeSteps < matlab.unittest.TestCase
             expectedNt = [4243 600 600 800 600 800];
 
             for builderIndex = 1:numel(builderPaths)
-                run(builderPaths{builderIndex});
+                if builderIndex == 3
+                    addpath(fileparts(builderPaths{builderIndex}), '-begin');
+                    cfg = build_cfg(struct());
+                else
+                    run(builderPaths{builderIndex});
+                end
 
                 testCase.verifyEqual(cfg.Nt, ...
                     ceil(1 / (cfg.dt * cfg.deltaF)), ...

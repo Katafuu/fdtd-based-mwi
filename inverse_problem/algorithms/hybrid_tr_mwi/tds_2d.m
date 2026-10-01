@@ -1,8 +1,12 @@
 % tds_2d Run and plot the interactive hybrid TR/TDS workflow.
-% Run build_cfg.m first to construct cfg in the current workspace.
+% A supplied cfg is reused; otherwise the default is built.
 
-assert(exist('cfg', 'var') == 1 && isstruct(cfg), ...
-    'tds_2d:MissingConfig', 'Run build_cfg.m before tds_2d.m.');
+if ~exist('cfg', 'var')
+    addpath(fileparts(mfilename('fullpath')), '-begin');
+    cfg = build_cfg(struct());
+end
+assert(isstruct(cfg) && isscalar(cfg), ...
+    'tds_2d:InvalidConfig', 'cfg must be a scalar struct.');
 
 %% Circular antenna array plot
 figure;

@@ -1,5 +1,6 @@
-function targets = generateRandomTargetSpecs(grid, doiMask, opts)
+function targets = generateRandomTargetSpecs(grid, doiMask, opts, occupiedMask)
 %generateRandomTargetSpecs Generate random target geometry/material specs.
+% occupiedMask optionally reserves cells for previously placed exact targets.
 
 if nargin < 3 || isempty(opts)
     opts = struct();
@@ -45,7 +46,15 @@ allowOverlap = logicalScalar(getOption(opts, 'allowOverlap', false), ...
 
 numTargets = randi(numTargetsRange);
 [candidateX, candidateY] = find(doiMask);
-occupiedMask = false(gridSize);
+if nargin < 4 || isempty(occupiedMask)
+    occupiedMask = false(gridSize);
+else
+    if ~isequal(size(occupiedMask), gridSize)
+        error('generateRandomTargetSpecs:InvalidOccupiedMask', ...
+            'occupiedMask must match grid.sizeXY.');
+    end
+    occupiedMask = logical(occupiedMask);
+end
 targetTemplate = struct( ...
     'mask', [], ...
     'name', "", ...
