@@ -1,8 +1,11 @@
 % Run one time-reversal iteration per antenna and collect each focus point.
 
-assert(exist('cfg', 'var') == 1 && isstruct(cfg), ...
-    'shape_estimate:MissingConfig', ...
-    'Run build_cfg.m before shape_estimate.m.');
+if ~exist('cfg', 'var')
+    addpath(fileparts(mfilename('fullpath')), '-begin');
+    cfg = build_cfg(struct());
+end
+assert(isstruct(cfg) && isscalar(cfg), ...
+    'shape_estimate:InvalidConfig', 'cfg must be a scalar struct.');
 
 cfg.opts.numIterations = 1; % Use one TR cycle per antenna estimate.
 
