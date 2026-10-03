@@ -1,12 +1,12 @@
-% Run three independent robustness cases for each target setup.
-% Each setup gets its own run folder with noise, target, and background cases.
+% Run one combined robustness case for each target setup.
+% Each run applies target/background inhomogeneity and receiver noise.
 
 %% Editable experiment controls
 if ~exist('setups', 'var')
     setups = {struct()}; % Add struct entries to run more target setups.
 end
-SNR_dB = 20;
-targetEpsrVariance = 0.04;
+SNR_dB = 10;
+targetEpsrVariance = 0.1;
 backgroundEpsrBase = 1.05;
 backgroundEpsrVariance = 0.0004;
 inhomCorrelationCells = 6;
@@ -29,6 +29,7 @@ validateattributes(robustSeed, {'numeric'}, ...
     {'real', 'scalar', 'integer', '>=', 0, '<=', 2^32-1});
 
 scriptDir = fileparts(mfilename('fullpath'));
+hybridDir = fullfile(fileparts(scriptDir), 'hybrid_tr_mwi');
 addpath(scriptDir, '-begin');
 assert(exist('fdtd_mex', 'file') == 3 || ...
     isfile(fullfile(scriptDir, '..', '..', '..', 'forward_solver', ...
@@ -59,10 +60,9 @@ else
     nextRunNumber = max(existingRunNumbers) + 1;
 end
 
-caseNames = {'noise', 'inhom_targ', 'inhom_bg'};
 for setupIdx = 1:numel(setups)
     setup = setups{setupIdx};
-    cfg = build_cfg(setup);
+    cfg = buildHybridCfg(setup, hybridDir);
     cfg.opts.numIterations = 1;
     cfg.opts.storeFieldHistory = false;
 
@@ -81,8 +81,7 @@ for setupIdx = 1:numel(setups)
         'shape_estimate_robust_test:EmptyTarget', ...
         'The setup contains no target cells.');
 
-    % Give all three cases the same nominal background and update the PML
-    % impedance to match it. Existing target permittivities are preserved.
+    % Set the nominal background while preserving the configured targets.
     cfg.grid.background.epsr = backgroundEpsrBase;
     cfg.grid.epsr(~targetMask) = backgroundEpsrBase;
     cfg.grid.epsr_bg(:) = backgroundEpsrBase;
@@ -98,109 +97,107 @@ for setupIdx = 1:numel(setups)
         cfg.pml.(fieldName) = pmlProfile.(fieldName);
     end
     cfg.pml.sigma_e = max(cfg.pml.condx, cfg.pml.condy);
-    baselineCfg = cfg;
     backgroundMask = ~targetMask & ~cfg.pml.mask;
+
+    % Apply both material variations before the noisy receiver run.
+    targetSeed = mod(double(robustSeed) + 3 * (setupIdx - 1) + 1, 2^32);
+    backgroundSeed = mod(double(robustSeed) + 3 * (setupIdx - 1) + 2, 2^32);
+    noiseSeed = mod(double(robustSeed) + 3 * (setupIdx - 1) + 3, 2^32);
+    [cfg, targetInfo] = fdtdmat.applyEpsrInhomogeneity( ...
+        cfg, targetMask, struct( ...
+        'variance', targetEpsrVariance, ...
+        'correlationCells', inhomCorrelationCells, ...
+        'seed', targetSeed));
+    [cfg, backgroundInfo] = fdtdmat.applyEpsrInhomogeneity( ...
+        cfg, backgroundMask, struct( ...
+        'variance', backgroundEpsrVariance, ...
+        'correlationCells', inhomCorrelationCells, ...
+        'seed', backgroundSeed));
+    cfg.opts.SNR_dB = SNR_dB;
+    info = struct('target', targetInfo, 'background', backgroundInfo, ...
+        'noiseSeed', noiseSeed, 'SNR_dB', SNR_dB);
+    caseName = 'combined';
+    caseSNR_dB = SNR_dB;
 
     runDir = fullfile(figsRoot, sprintf('run_%04d', nextRunNumber));
     nextRunNumber = nextRunNumber + 1;
     mkdir(runDir);
+    saveTrueSystemModel(cfg, targetMask, runDir);
 
-    %% Run the three cases separately
-    for caseIdx = 1:numel(caseNames)
-        caseName = caseNames{caseIdx};
-        caseSeed = mod(double(robustSeed) + ...
-            3 * (setupIdx - 1) + caseIdx, 2^32);
-        cfg = baselineCfg;
-        cfg.opts.SNR_dB = [];
-        info = struct();
-        switch caseName
-            case 'noise'
-                cfg.opts.SNR_dB = SNR_dB;
-                rng(caseSeed, 'twister');
-            case 'inhom_targ'
-                [cfg, info] = fdtdmat.applyEpsrInhomogeneity( ...
-                    cfg, targetMask, struct( ...
-                    'variance', targetEpsrVariance, ...
-                    'correlationCells', inhomCorrelationCells, ...
-                    'seed', caseSeed));
-            case 'inhom_bg'
-                [cfg, info] = fdtdmat.applyEpsrInhomogeneity( ...
-                    cfg, backgroundMask, struct( ...
-                    'variance', backgroundEpsrVariance, ...
-                    'correlationCells', inhomCorrelationCells, ...
-                    'seed', caseSeed));
-        end
+    focusPoints = zeros(cfg.antennas.numAntennas, 2);
+    focusMagFrames = zeros(cfg.Nx, cfg.Ny, cfg.antennas.numAntennas);
+    focusMagnitudeImages = zeros(size(focusMagFrames));
+    receiverNoisePowers = nan(cfg.antennas.numAntennas, 1);
+    totalRuntime = 0;
 
-        figsDir = fullfile(runDir, caseName);
-        mkdir(figsDir);
-        focusPoints = zeros(cfg.antennas.numAntennas, 2);
-        focusMagFrames = zeros(cfg.Nx, cfg.Ny, cfg.antennas.numAntennas);
-        focusMagnitudeImages = zeros(size(focusMagFrames));
-        receiverNoisePowers = nan(cfg.antennas.numAntennas, 1);
-        totalRuntime = 0;
+    rng(noiseSeed, 'twister');
+    fprintf('\nSetup %d/%d: running combined case under %s.\n', ...
+        setupIdx, numel(setups), runDir);
+    for antennaIdx = 1:cfg.antennas.numAntennas
+        runTimer = tic;
+        antennaCfg = cfg;
+        antennaCfg.antennas.txAntennas = antennaIdx;
+        antennaCfg.source.samples(:) = 0;
+        antennaCfg.source.samples(antennaIdx, :) = ...
+            antennaCfg.source.func((0:antennaCfg.Nt-1) .* antennaCfg.dt);
 
-        fprintf('\nSetup %d/%d: running %s under %s.\n', ...
-            setupIdx, numel(setups), caseName, figsDir);
-        for antennaIdx = 1:cfg.antennas.numAntennas
-            runTimer = tic;
-            antennaCfg = cfg;
-            antennaCfg.antennas.txAntennas = antennaIdx;
-            antennaCfg.source.samples(:) = 0;
-            antennaCfg.source.samples(antennaIdx, :) = ...
-                antennaCfg.source.func((0:antennaCfg.Nt-1) .* antennaCfg.dt);
+        itrResult = itr_run(antennaCfg, SNR_dB);
+        [~, focusLinearIndex] = max(abs(itrResult.focusMagFrame(:)));
+        [focusX, focusY] = ind2sub( ...
+            size(itrResult.focusMagFrame), focusLinearIndex);
+        focusPoint = [focusX, focusY];
+        receiverNoisePowers(antennaIdx) = ...
+            itrResult.receiverNoisePowers(end);
 
-            if strcmp(caseName, 'noise')
-                itrResult = itr_run(antennaCfg, SNR_dB);
-                [~, focusLinearIndex] = max(abs(itrResult.focusMagFrame(:)));
-                [focusX, focusY] = ind2sub( ...
-                    size(itrResult.focusMagFrame), focusLinearIndex);
-                focusPoint = [focusX, focusY];
-                receiverNoisePowers(antennaIdx) = ...
-                    itrResult.receiverNoisePowers(end);
-            else
-                [itrResult, focusPoint] = tr_mwi(antennaCfg);
-            end
+        focusPoints(antennaIdx, :) = focusPoint;
+        focusMagFrames(:, :, antennaIdx) = itrResult.focusMagFrame;
+        focusMagnitudeImages(:, :, antennaIdx) = ...
+            abs(itrResult.focusMagFrame);
+        saveMaxEz(itrResult, focusPoint, antennaIdx, ...
+            runDir, targetMask, cfg);
+        clear itrResult;
 
-            focusPoints(antennaIdx, :) = focusPoint;
-            focusMagFrames(:, :, antennaIdx) = itrResult.focusMagFrame;
-            focusMagnitudeImages(:, :, antennaIdx) = ...
-                abs(itrResult.focusMagFrame);
-            saveMaxEz(itrResult, focusPoint, antennaIdx, ...
-                figsDir, targetMask, cfg);
-            clear itrResult;
-
-            elapsedTime = toc(runTimer);
-            totalRuntime = totalRuntime + elapsedTime;
-            fprintf('Case %s: antenna %d/%d done in %.2f seconds.\n', ...
-                caseName, antennaIdx, cfg.antennas.numAntennas, elapsedTime);
-        end
-
-        fprintf('Case %s total runtime: %.2f seconds.\n', ...
-            caseName, totalRuntime);
-        fprintf('Average runtime per antenna: %.2f seconds.\n', ...
-            totalRuntime/cfg.antennas.numAntennas);
-        saveFocusOverview(focusPoints, cfg, targetMask, figsDir);
-
-        [doiPoints, doiPointIndices] = selectShapePointsInsideDoi( ...
-            focusPoints, cfg.antennas.doiMask);
-        [inlierPoints, ~, inlierDoiIndices] = ...
-            filterShapeOutlinePoints(doiPoints, 1.5);
-        estimatedOutlinePoints = orderShapeOutlinePoints( ...
-            inlierPoints, doiPointIndices(inlierDoiIndices));
-        antennaIndices = (1:cfg.antennas.numAntennas).';
-        caseSNR_dB = cfg.opts.SNR_dB;
-        save(fullfile(figsDir, 'shape_estimate_results.mat'), ...
-            'cfg', 'setup', 'setupIdx', 'caseName', 'caseSeed', ...
-            'caseSNR_dB', 'robustSeed', 'info', ...
-            'targetMask', 'backgroundMask', ...
-            'antennaIndices', 'focusPoints', 'estimatedOutlinePoints', ...
-            'focusMagFrames', 'focusMagnitudeImages', ...
-            'receiverNoisePowers', '-v7.3');
+        elapsedTime = toc(runTimer);
+        totalRuntime = totalRuntime + elapsedTime;
+        fprintf('Antenna %d/%d done in %.2f seconds.\n', ...
+            antennaIdx, cfg.antennas.numAntennas, elapsedTime);
     end
+
+    fprintf('Combined run total runtime: %.2f seconds.\n', totalRuntime);
+    fprintf('Average runtime per antenna: %.2f seconds.\n', ...
+        totalRuntime/cfg.antennas.numAntennas);
+    saveFocusOverview(focusPoints, cfg, targetMask, runDir);
+
+    [doiPoints, doiPointIndices] = selectShapePointsInsideDoi( ...
+        focusPoints, cfg.antennas.doiMask);
+    [inlierPoints, ~, inlierDoiIndices] = ...
+        filterShapeOutlinePoints(doiPoints, 1.5);
+    estimatedOutlinePoints = orderShapeOutlinePoints( ...
+        inlierPoints, doiPointIndices(inlierDoiIndices));
+    antennaIndices = (1:cfg.antennas.numAntennas).';
+    save(fullfile(runDir, 'shape_estimate_results.mat'), ...
+        'cfg', 'setup', 'setupIdx', 'caseName', 'caseSNR_dB', ...
+        'robustSeed', 'targetSeed', 'backgroundSeed', 'noiseSeed', 'info', ...
+        'targetMask', 'backgroundMask', ...
+        'antennaIndices', 'focusPoints', 'estimatedOutlinePoints', ...
+        'focusMagFrames', 'focusMagnitudeImages', ...
+        'receiverNoisePowers', '-v7.3');
     fprintf('\nSaved setup %d under %s.\n', setupIdx, runDir);
 end
 
 %% Plotting functions copied from shape_estimate.m
+function cfg = buildHybridCfg(setup, hybridDir)
+    % Resolve the 12-antenna builder despite the same-named local builder.
+    originalDir = pwd;
+    directoryCleanup = onCleanup(@() cd(originalDir)); %#ok<NASGU>
+    cd(hybridDir);
+    if ~strcmp(which('build_cfg'), fullfile(hybridDir, 'build_cfg.m'))
+        error('shape_estimate_robust_test:WrongConfigBuilder', ...
+            'Could not resolve the hybrid build_cfg.m.');
+    end
+    cfg = build_cfg(setup);
+end
+
 function saveMaxEz(itrResult, focusPoint, antennaIdx, figsDir, targetMask, cfg)
     maxMagnitudeFigure = figure('Visible', 'off');
     axesHandle = axes(maxMagnitudeFigure);
@@ -241,4 +238,27 @@ function saveFocusOverview(points, cfg, targetMask, figsDir)
         fullfile(figsDir, 'all_maximum_points.png'), 'Resolution', 300);
     exportgraphics(outlineFigure, ...
         fullfile(figsDir, 'estimated_outline.png'), 'Resolution', 300);
+end
+
+function saveTrueSystemModel(cfg, targetMask, figsDir)
+    modelFigure = figure('Visible', 'off');
+    axesHandle = axes(modelFigure);
+    imagesc(axesHandle, cfg.grid.epsr.');
+    axis(axesHandle, 'equal', 'tight');
+    set(axesHandle, 'YDir', 'normal');
+    colorbar(axesHandle);
+    hold(axesHandle, 'on');
+    contour(axesHandle, double(cfg.antennas.doiMask).', [0.5 0.5], ...
+        'Color', [0 0.9 0.9], 'LineStyle', '--', 'LineWidth', 1.5);
+    contour(axesHandle, double(targetMask).', [0.5 0.5], ...
+        'Color', [1 0.25 0.25], 'LineWidth', 1.75);
+    plot(axesHandle, cfg.antennas.pos(:, 1), cfg.antennas.pos(:, 2), ...
+        'ko', 'MarkerFaceColor', 'y', 'MarkerSize', 5);
+    hold(axesHandle, 'off');
+    xlabel(axesHandle, 'x grid index');
+    ylabel(axesHandle, 'y grid index');
+    title(axesHandle, 'True system model (\epsilon_r)');
+    exportgraphics(modelFigure, ...
+        fullfile(figsDir, 'true_system_model.png'), 'Resolution', 300);
+    close(modelFigure);
 end

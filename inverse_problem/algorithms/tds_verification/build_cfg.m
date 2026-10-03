@@ -1,5 +1,14 @@
-% build_cfg Construct the reproducible transmission-delay verification case.
-% Run this script once before tds_2d.m.
+function cfg = build_cfg(setup)
+%build_cfg Construct a transmission-delay verification FDTD configuration.
+% No setup uses one fixed off-center circle. setup.targetSpecs is a struct
+% array with name, properties, and material fields. setup.targetOpts requests
+% additional random targets; setup.randomSeed controls only that generation.
+if nargin < 1 || isempty(setup)
+    setup = struct();
+end
+if ~isstruct(setup) || ~isscalar(setup)
+    error('build_cfg:InvalidSetup', 'setup must be a scalar struct.');
+end
 
 %% Repository / path setup
 scriptPath = mfilename('fullpath');
@@ -16,11 +25,15 @@ workspaceRoot = fileparts(fileparts(fileparts(algorithmDir)));
 buildLibDir = fullfile(workspaceRoot, 'buildLib');
 mexDir = fullfile(workspaceRoot, 'forward_solver', 'mex');
 mwiLibDir = fullfile(algorithmsDir, 'transmission_mwi', 'lib');
+trLibDir = fullfile(algorithmsDir, 'time_reversal', 'lib');
+hybridLibDir = fullfile(algorithmsDir, 'hybrid_tr_mwi', 'lib');
 verificationLibDir = fullfile(algorithmDir, 'lib');
 
 addpath(buildLibDir, '-end');
 addpath(mexDir, '-end');
 addpath(mwiLibDir, '-end');
+addpath(trLibDir, '-end');
+addpath(hybridLibDir, '-end');
 addpath(verificationLibDir, '-begin');
 addpath(algorithmDir, '-begin');
 
@@ -29,22 +42,33 @@ assert(isfile(fullfile(workspaceRoot, 'forward_solver', 'Makefile')) && ...
        isfolder(fullfile(workspaceRoot, 'forward_solver', 'utility')), ...
        'Could not find forward_solver at the workspace root.');
 
-%% Reproducible homogeneous target controls
-if ~exist('verificationSeed', 'var') || isempty(verificationSeed)
-    verificationSeed = 1;
+%% Random target defaults (used only when targetOpts is supplied)
+targetOpts = struct( ...
+    'numTargetsRange', [1 1], ...
+    'allowedShapes', ["rectangle"], ...
+    'radiusRange', [10 28], ...
+    'sideRange', [31 31], ...
+    'epsrRange', [2.5 6.0], ...
+    'condRange', [0.02 0.15], ...
+    'maxAttempts', 800, ...
+    'allowOverlap', false);
+if isfield(setup, 'targetOpts')
+    if ~isstruct(setup.targetOpts) || ~isscalar(setup.targetOpts)
+        error('build_cfg:InvalidTargetOpts', ...
+            'setup.targetOpts must be a scalar struct.');
+    end
+    optionNames = fieldnames(setup.targetOpts);
+    for optionIdx = 1:numel(optionNames)
+        optionName = optionNames{optionIdx};
+        if ~isfield(targetOpts, optionName)
+            error('build_cfg:UnknownTargetOption', ...
+                'Unknown target option "%s".', optionName);
+        end
+        if ~isempty(setup.targetOpts.(optionName))
+            targetOpts.(optionName) = setup.targetOpts.(optionName);
+        end
+    end
 end
-randomSeed = verificationSeed;
-rng(randomSeed, 'twister');
-
-targetOpts = struct();
-targetOpts.numTargetsRange = [1 1];
-targetOpts.allowedShapes = "rectangle";
-targetOpts.radiusRange = [10 28];
-targetOpts.sideRange = [31 31];
-targetOpts.epsrRange = [2.5 6.0];
-targetOpts.condRange = [0.02 0.15];
-targetOpts.maxAttempts = 800;
-targetOpts.allowOverlap = false;
 
 %% Simulation parameters
 cfg = struct();
@@ -122,45 +146,75 @@ cfg = buildCircularAntennaArrayIdx(cfg);
 fprintf('Built circular array: Nant = %d, radius = %.1f cells.\n', ...
     cfg.antennas.numAntennas, cfg.antennas.radius);
 
-%% One random homogeneous target on the 2x material grid
-cfg.targets = generateRandomTargetSpecs( ...
-    cfg.grid, cfg.antennas.doiMask, targetOpts);
-
-assert(isscalar(cfg.targets), ...
-    'build_cfg:ExpectedSingleTarget', ...
-    'The verification configuration requires exactly one target.');
-
-target = cfg.targets(1);
-switch string(target.name)
-    case "circle"
-        centerPhysical = (target.properties.center - 1) .* ...
-            [cfg.dx cfg.dy];
-        radiusPhysical = target.properties.radius * cfg.dx;
-        radiusPhysical = radiusPhysical + ...
-            10 * eps(max([abs(centerPhysical), radiusPhysical]));
-        highGridTarget = fdtdgeom.shape_circle(highGrid, ...
-            centerPhysical, radiusPhysical, 'physical');
-    case "rectangle"
-        bounds = target.properties.bounds;
-        physicalBounds = [ ...
-            (bounds(1) - 1) * cfg.dx, (bounds(2) - 1) * cfg.dx, ...
-            (bounds(3) - 1) * cfg.dy, (bounds(4) - 1) * cfg.dy];
-        boundsTolerance = 10 * eps(max(abs(physicalBounds)));
-        physicalBounds = physicalBounds + ...
-            [-boundsTolerance boundsTolerance ...
-            -boundsTolerance boundsTolerance];
-        highGridTarget = fdtdgeom.shape_rectangle( ...
-            highGrid, physicalBounds, 'physical');
-    case "triangle"
-        physicalVertices = (target.properties.vertices - 1) .* ...
-            [cfg.dx cfg.dy];
-        highGridTarget = fdtdgeom.shape_polygon( ...
-            highGrid, physicalVertices, 'physical');
-    otherwise
-        error('build_cfg:UnsupportedTargetShape', ...
-            'Unsupported target shape "%s".', target.name);
+%% Exact targets first, then optional random targets on the 2x grid
+if isfield(setup, 'targetSpecs')
+    exactTargets = exactTargetSpecs(setup.targetSpecs, ...
+        cfg.grid, cfg.antennas.doiMask);
+elseif ~isfield(setup, 'targetOpts')
+    defaultTarget = struct( ...
+        'name', "circle", ...
+        'properties', struct('center', [215 205], 'radius', 20), ...
+        'material', struct('epsr', 5.0, 'cond_e', 0.1));
+    exactTargets = exactTargetSpecs(defaultTarget, ...
+        cfg.grid, cfg.antennas.doiMask);
+else
+    exactTargets = exactTargetSpecs([], cfg.grid, cfg.antennas.doiMask);
 end
-highGrid = fdtdmat.applyRegion(highGrid, highGridTarget, target.material);
+cfg.targets = exactTargets;
+if isfield(setup, 'targetOpts')
+    occupiedMask = false(cfg.Nx, cfg.Ny);
+    for targetIdx = 1:numel(exactTargets)
+        occupiedMask = occupiedMask | exactTargets(targetIdx).mask;
+    end
+    if isfield(setup, 'randomSeed') && ~isempty(setup.randomSeed)
+        validateattributes(setup.randomSeed, {'numeric'}, ...
+            {'real', 'scalar', 'integer', '>=', 0, '<=', 2^32-1});
+        priorRng = rng;
+        rngCleanup = onCleanup(@() rng(priorRng)); %#ok<NASGU>
+        rng(setup.randomSeed, 'twister');
+    end
+    randomTargets = generateRandomTargetSpecs( ...
+        cfg.grid, cfg.antennas.doiMask, targetOpts, occupiedMask);
+    cfg.targets = [cfg.targets randomTargets];
+end
+if isempty(cfg.targets)
+    error('build_cfg:NoTargets', 'The setup must produce at least one target.');
+end
+
+for targetIdx = 1:numel(cfg.targets)
+    target = cfg.targets(targetIdx);
+    switch string(target.name)
+        case "circle"
+            centerPhysical = (target.properties.center - 1) .* ...
+                [cfg.dx cfg.dy];
+            radiusPhysical = target.properties.radius * cfg.dx;
+            radiusPhysical = radiusPhysical + ...
+                10 * eps(max([abs(centerPhysical), radiusPhysical]));
+            highGridTarget = fdtdgeom.shape_circle(highGrid, ...
+                centerPhysical, radiusPhysical, 'physical');
+        case "rectangle"
+            bounds = target.properties.bounds;
+            physicalBounds = [ ...
+                (bounds(1) - 1) * cfg.dx, (bounds(2) - 1) * cfg.dx, ...
+                (bounds(3) - 1) * cfg.dy, (bounds(4) - 1) * cfg.dy];
+            boundsTolerance = 10 * eps(max(abs(physicalBounds)));
+            physicalBounds = physicalBounds + ...
+                [-boundsTolerance boundsTolerance ...
+                -boundsTolerance boundsTolerance];
+            highGridTarget = fdtdgeom.shape_rectangle( ...
+                highGrid, physicalBounds, 'physical');
+        case "triangle"
+            physicalVertices = (target.properties.vertices - 1) .* ...
+                [cfg.dx cfg.dy];
+            highGridTarget = fdtdgeom.shape_polygon( ...
+                highGrid, physicalVertices, 'physical');
+        otherwise
+            error('build_cfg:UnsupportedTargetShape', ...
+                'Unsupported target shape "%s".', target.name);
+    end
+    highGrid = fdtdmat.applyRegion( ...
+        highGrid, highGridTarget, target.material);
+end
 
 cfg.grid.epsr = highGrid.epsr(1:2:(2*cfg.Nx - 1), 1:2:(2*cfg.Ny - 1));
 cfg.grid.cond_e = highGrid.cond_e(1:2:(2*cfg.Nx - 1), 1:2:(2*cfg.Ny - 1));
@@ -195,6 +249,124 @@ cfg.source.samples(cfg.antennas.txAntennas, :) = repmat( ...
     cfg.source.func(cfg.source.time), ...
     numel(cfg.antennas.txAntennas), 1);
 
+cfg.opts = struct();
+cfg.opts.storeFieldHistory = true;
+cfg.opts.historyStride = 1;
+cfg.opts.numIterations = 1;
+cfg.opts.applyTemporalWindow = true;
+cfg.opts.temporalWindowTau = cfg.source.pulseWidth;
+cfg.opts.normalizeTraces = true;
 cfg.filename = '';
 
-fprintf('Verification target uses fixed RNG seed %d.\n', randomSeed);
+end
+
+function targets = exactTargetSpecs(specs, grid, doiMask)
+% Store exact targets in the same schema as random target specs.
+template = struct( ...
+    'mask', [], 'name', "", ...
+    'material', struct('epsr', NaN, 'murx', NaN, 'mury', NaN, ...
+        'cond_e', NaN, 'cond_m', NaN), ...
+    'properties', struct());
+targets = repmat(template, 1, 0);
+if isempty(specs)
+    return;
+end
+if ~isstruct(specs)
+    error('build_cfg:InvalidTargetSpecs', ...
+        'setup.targetSpecs must be a struct array.');
+end
+occupiedMask = false(size(doiMask));
+for targetIdx = 1:numel(specs)
+    spec = specs(targetIdx);
+    if ~isfield(spec, 'name') || ~isfield(spec, 'properties') || ...
+            ~isfield(spec, 'material') || ~isstruct(spec.properties) || ...
+            ~isscalar(spec.properties) || ~isstruct(spec.material) || ...
+            ~isscalar(spec.material)
+        error('build_cfg:InvalidTargetSpec', ...
+            'Each target needs name, properties, and material structs.');
+    end
+    name = lower(string(spec.name));
+    if ~isscalar(name)
+        error('build_cfg:InvalidTargetShape', ...
+            'Each target name must be scalar.');
+    end
+    properties = spec.properties;
+    switch name
+        case "circle"
+            requireField(properties, 'center');
+            requireField(properties, 'radius');
+            validateattributes(properties.center, {'numeric'}, ...
+                {'real', 'finite', 'numel', 2});
+            validateattributes(properties.radius, {'numeric'}, ...
+                {'real', 'finite', 'scalar', 'positive'});
+            properties.center = double(properties.center(:).');
+            properties.radius = double(properties.radius);
+            region = fdtdgeom.shape_circle(grid, ...
+                properties.center, properties.radius, 'index');
+        case "rectangle"
+            requireField(properties, 'bounds');
+            validateattributes(properties.bounds, {'numeric'}, ...
+                {'real', 'finite', 'numel', 4});
+            properties.bounds = double(properties.bounds(:).');
+            if properties.bounds(1) > properties.bounds(2) || ...
+                    properties.bounds(3) > properties.bounds(4)
+                error('build_cfg:InvalidTargetBounds', ...
+                    'Rectangle bounds must be [xMin xMax yMin yMax].');
+            end
+            region = fdtdgeom.shape_rectangle(grid, ...
+                properties.bounds, 'index');
+        case "triangle"
+            requireField(properties, 'vertices');
+            validateattributes(properties.vertices, {'numeric'}, ...
+                {'real', 'finite', 'size', [3 2]});
+            properties.vertices = double(properties.vertices);
+            region = fdtdgeom.shape_polygon(grid, ...
+                properties.vertices, 'index');
+        otherwise
+            error('build_cfg:UnsupportedTargetShape', ...
+                'Unsupported target shape "%s".', name);
+    end
+    mask = logical(region.mask);
+    if ~any(mask(:)) || any(mask(:) & ~doiMask(:))
+        error('build_cfg:TargetOutsideDOI', ...
+            'Exact target %d must fit entirely inside the DOI.', targetIdx);
+    end
+    if any(mask(:) & occupiedMask(:))
+        error('build_cfg:OverlappingExactTargets', ...
+            'Exact target %d overlaps another exact target.', targetIdx);
+    end
+    material = spec.material;
+    requireField(material, 'epsr');
+    requireField(material, 'cond_e');
+    if ~isfield(material, 'murx'), material.murx = 1; end
+    if ~isfield(material, 'mury'), material.mury = 1; end
+    if ~isfield(material, 'cond_m'), material.cond_m = 0; end
+    validateattributes(material.epsr, {'numeric'}, ...
+        {'real', 'finite', 'scalar', '>=', 1});
+    validateattributes(material.cond_e, {'numeric'}, ...
+        {'real', 'finite', 'scalar', 'nonnegative'});
+    validateattributes(material.murx, {'numeric'}, ...
+        {'real', 'finite', 'scalar', 'positive'});
+    validateattributes(material.mury, {'numeric'}, ...
+        {'real', 'finite', 'scalar', 'positive'});
+    validateattributes(material.cond_m, {'numeric'}, ...
+        {'real', 'finite', 'scalar', 'nonnegative'});
+    target = template;
+    target.mask = mask;
+    target.name = name;
+    target.properties = properties;
+    target.material = struct('epsr', double(material.epsr), ...
+        'murx', double(material.murx), 'mury', double(material.mury), ...
+        'cond_e', double(material.cond_e), ...
+        'cond_m', double(material.cond_m));
+    targets(end + 1) = target; %#ok<AGROW>
+    occupiedMask = occupiedMask | mask;
+end
+end
+
+function requireField(value, name)
+if ~isfield(value, name)
+    error('build_cfg:MissingTargetField', ...
+        'Target is missing required field "%s".', name);
+end
+end

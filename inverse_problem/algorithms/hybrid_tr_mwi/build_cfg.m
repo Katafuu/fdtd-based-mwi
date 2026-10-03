@@ -135,7 +135,7 @@ cfg.pml.sigma_e = max(cfg.pml.condx, cfg.pml.condy);
 % One shared antenna list. Antenna tx acts as transmitter; all other
 % antennas are receivers for that tx.
 cfg.antennas = struct();
-cfg.antennas.numAntennas = 16;
+cfg.antennas.numAntennas = 12;
 cfg.antennas.txAntennas = 12; % Select the initial TR transmitting antennas.
 cfg.antennas.pmlPadding = 5;
 cfg.antennas.focusPadding = 20;

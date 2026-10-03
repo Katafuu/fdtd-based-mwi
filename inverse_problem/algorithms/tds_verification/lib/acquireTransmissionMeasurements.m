@@ -1,6 +1,10 @@
 function measurement = acquireTransmissionMeasurements(cfg, options)
 %acquireTransmissionMeasurements Run object/reference scans for one case.
 
+assert(isfield(cfg, 'targets') && isscalar(cfg.targets), ...
+    'acquireTransmissionMeasurements:ExpectedSingleTarget', ...
+    'The homogeneous verification requires exactly one target.');
+
 if nargin < 2 || isempty(options)
     options = struct();
 end

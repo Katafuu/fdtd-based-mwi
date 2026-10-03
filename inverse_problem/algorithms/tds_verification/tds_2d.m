@@ -1,8 +1,12 @@
 % tds_2d Verify homogeneous target permittivity from transmission delays.
-% Run build_cfg.m first to construct cfg in the current workspace.
+% A supplied cfg is reused; otherwise the fixed default is built.
 
-assert(exist('cfg', 'var') == 1 && isstruct(cfg), ...
-    'tds_2d:MissingConfig', 'Run build_cfg.m before tds_2d.m.');
+if ~exist('cfg', 'var')
+    addpath(fileparts(mfilename('fullpath')), '-begin');
+    cfg = build_cfg(struct());
+end
+assert(isstruct(cfg) && isscalar(cfg), ...
+    'tds_2d:InvalidConfig', 'cfg must be a scalar struct.');
 assert(isfield(cfg, 'targets') && isscalar(cfg.targets), ...
     'tds_2d:ExpectedSingleTarget', ...
     'The verification requires exactly one configured target.');

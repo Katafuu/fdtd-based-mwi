@@ -1,136 +1,119 @@
-% tds_2d Run and plot the interactive hybrid TR/TDS workflow.
-% A supplied cfg is reused; otherwise the default is built.
+function result = tds_2d(cfg)
+%tds_2d Reconstruct one effective epsr inside time-reversal support.
+% With no input, build the default hybrid configuration. Both call forms
+% save shape figures, truth, reconstruction, and DOI error in a new run folder.
 
-if ~exist('cfg', 'var')
-    addpath(fileparts(mfilename('fullpath')), '-begin');
+if nargin < 1 || isempty(cfg)
     cfg = build_cfg(struct());
 end
 assert(isstruct(cfg) && isscalar(cfg), ...
     'tds_2d:InvalidConfig', 'cfg must be a scalar struct.');
 
-%% Circular antenna array plot
-figure;
-plotAntennaArray(cfg.antennas.pos, cfg.antennas.center, ...
-    cfg.Nx, cfg.Ny, cfg.pml.thickness);
-title('Circular antenna array');
-
-% Assume itr_run(cfg) returns tr_result.focusMagFrame.
-[tr_result, focusPoint] = tr_mwi(cfg); %#ok<NASGU>
-
-%% Pair geometry: distance, global ray angle, and relative off-boresight angles
-% distance(tx,rx): physical distance from antenna tx to antenna rx
-% beta_tx(tx,rx): angle between tx boresight and outgoing ray tx->rx
-% beta_rx(tx,rx): angle between rx boresight and incoming ray rx->tx
-% pairWeight(tx,rx): cos(beta_tx)*cos(beta_rx), with nonpositive values removed
-[distance, globalAngle, beta_tx, beta_rx, pairWeight] = buildCircularPairGeometry( ...
-    cfg.antennas.pos, cfg.dx, cfg.dy, cfg.antennas.center);
-
-maxAngle = deg2rad(40);
-pairAccepted = abs(beta_tx) <= maxAngle & abs(beta_rx) <= maxAngle & isfinite(distance);
-pairAccepted(eye(cfg.antennas.numAntennas) == 1) = false;
-
-% Optional diagnostics
-fprintf('Accepted TX-RX pairs: %d out of %d possible off-diagonal pairs.\n', ...
-    nnz(pairAccepted), cfg.antennas.numAntennas*(cfg.antennas.numAntennas-1));
-
-%% Run object/reference simulations and extract excess delay steps
-delaysteps = nan(cfg.antennas.numAntennas, cfg.antennas.numAntennas);
-arrival_obj_steps = nan(cfg.antennas.numAntennas, cfg.antennas.numAntennas);
-arrival_inc_steps = nan(cfg.antennas.numAntennas, cfg.antennas.numAntennas);
-
-for tx = 1:cfg.antennas.numAntennas
-    cfg.source.samples(:) = 0;
-    cfg.source.samples(tx, :) = ...
-        cfg.source.func((0:cfg.Nt-1) .* cfg.dt);
-
-    rxList = setdiff(1:cfg.antennas.numAntennas, tx);
-    receiver_indices_this_tx = cfg.antennas.pos(rxList, :);
-
-    % Object scan
-    fdtdMexResult = fdtd_mex(cfg);
-
-    % Incident/reference scan in background medium
-    incident_cfg = fdtdmat.setBackgroundDefault(cfg, cfg.grid.background);
-    fdtdMexResult_inc = fdtd_mex(incident_cfg);
-
-    % Parse Ez into internal convention Ez(x,y,t)
-    Ez = fdtdMexResult.Ez;
-
-    Ez_inc = fdtdMexResult_inc.Ez;
-
-    arrival_obj = getArrivalSteps(Ez, receiver_indices_this_tx, cfg);
-    arrival_inc = getArrivalSteps(Ez_inc, receiver_indices_this_tx, incident_cfg);
-
-    arrival_obj_steps(tx, rxList) = arrival_obj.';
-    arrival_inc_steps(tx, rxList) = arrival_inc.';
-    delaysteps(tx, rxList) = arrival_obj.' - arrival_inc.';
-
-    fprintf('Finished transmitter %d / %d.\n', tx, cfg.antennas.numAntennas);
+outputRoot = fullfile(fileparts(mfilename('fullpath')), 'figs', 'tds_2d');
+if ~isfolder(outputRoot)
+    mkdir(outputRoot);
 end
-
-%% Compute pairwise average permittivity estimates
-% delaysteps is already arrival_obj - arrival_inc in units of time steps.
-% Therefore do NOT subtract 1 here.
-Delta_t = delaysteps * cfg.dt;
-
-clampNegativeDelays = true;
-if clampNegativeDelays
-    Delta_t(Delta_t < 0) = 0;
+existingRuns = dir(fullfile(outputRoot, 'run_*'));
+runNumbers = zeros(0, 1);
+for runIdx = 1:numel(existingRuns)
+    if ~existingRuns(runIdx).isdir
+        continue;
+    end
+    token = regexp(existingRuns(runIdx).name, ...
+        '^run_(\d+)$', 'tokens', 'once');
+    if ~isempty(token)
+        runNumbers(end + 1, 1) = str2double(token{1}); %#ok<AGROW>
+    end
 end
+outputDir = fullfile(outputRoot, ...
+    sprintf('run_%04d', max([0; runNumbers]) + 1));
+mkdir(outputDir);
 
-eps_r = (1 + (cfg.c0 .* Delta_t) ./ distance).^2;
-eps_r(eye(cfg.antennas.numAntennas) == 1) = NaN;
+[supportMask, shapeDetails] = shape_estimate( ...
+    cfg, fullfile(outputDir, 'shape_estimate'));
+measurement = acquireTransmissionMeasurements(cfg);
+[recoveredTargetEpsr, maximumChordDetails] = ...
+    estimateMaximumChordEpsr(measurement, supportMask);
+reconstructedEpsr = reconstructHomogeneousTargetMap( ...
+    supportMask, measurement.backgroundEpsr, recoveredTargetEpsr);
 
-%% Build paper-style footprint masks for the circular array
-xRange = cfg.pml.thickness+1 : cfg.Nx-cfg.pml.thickness;
-yRange = cfg.pml.thickness+1 : cfg.Ny-cfg.pml.thickness;
+trueEpsr = cfg.grid.epsr;
+doiMask = logical(cfg.antennas.doiMask);
+assert(isequal(size(trueEpsr), size(reconstructedEpsr), size(doiMask)) ...
+    && any(doiMask(:)), 'tds_2d:InvalidDoi', ...
+    'Truth, reconstruction, and nonempty DOI mask must share a grid size.');
+doiDifference = reconstructedEpsr(doiMask) - trueEpsr(doiMask);
+doiError = struct( ...
+    'numPixels', nnz(doiMask), ...
+    'meanAbsoluteError', mean(abs(doiDifference)), ...
+    'rootMeanSquareError', sqrt(mean(doiDifference.^2)), ...
+    'meanAbsolutePercentageError', ...
+        100 * mean(abs(doiDifference) ./ abs(trueEpsr(doiMask))));
 
-% Use footprint size based on circular antenna arc spacing as a reasonable
-% first value. Tune Lfp_cells depending on desired coverage/resolution.
-arcSpacingCells = 2*pi*cfg.antennas.radius / cfg.antennas.numAntennas;
-Lfp_cells = max(1, round(arcSpacingCells/2));
+result = struct( ...
+    'outputDir', outputDir, ...
+    'supportMask', supportMask, ...
+    'recoveredTargetEpsr', recoveredTargetEpsr, ...
+    'reconstructedEpsr', reconstructedEpsr, ...
+    'trueEpsr', trueEpsr, ...
+    'doiError', doiError, ...
+    'shapeDetails', shapeDetails, ...
+    'maximumChordDetails', maximumChordDetails, ...
+    'measurement', measurement);
 
-focusBias = 1;
-
-[mask4D, xRange, yRange] = buildFootprintMask( ...
-    cfg.Nx, cfg.Ny, cfg.pml.thickness, cfg.antennas.pos, ...
-    cfg.antennas.pos, Lfp_cells, focusPoint, focusBias, ...
-    cfg.antennas.doiMask);
-
-% Remove self-pair masks.
-for ant = 1:cfg.antennas.numAntennas
-    mask4D(:,:,ant,ant) = false;
+reconstructionFigure = figure('Visible', 'off');
+figureCleanup = onCleanup(@() close(reconstructionFigure)); %#ok<NASGU>
+axesHandle = axes('Parent', reconstructionFigure);
+imagesc(axesHandle, 1:cfg.Nx, 1:cfg.Ny, reconstructedEpsr.');
+axis(axesHandle, 'equal', 'tight');
+set(axesHandle, 'YDir', 'normal');
+colormap(axesHandle, turbo);
+colorLimits = [min([trueEpsr(:); reconstructedEpsr(:)]), ...
+    max([trueEpsr(:); reconstructedEpsr(:)])];
+if colorLimits(1) < colorLimits(2)
+    clim(axesHandle, colorLimits);
 end
+colorbar(axesHandle);
+xlabel(axesHandle, 'x grid index');
+ylabel(axesHandle, 'y grid index');
+title(axesHandle, sprintf( ...
+    'Estimated support: reconstructed \\epsilon_r = %.4f', ...
+    recoveredTargetEpsr));
+exportgraphics(reconstructionFigure, ...
+    fullfile(outputDir, 'epsr_reconstruction.png'), 'Resolution', 300);
 
-fprintf('Built circular footprint masks with Lfp_cells = %d.\n', Lfp_cells);
+truthFigure = figure('Visible', 'off');
+truthCleanup = onCleanup(@() close(truthFigure)); %#ok<NASGU>
+truthAxes = axes('Parent', truthFigure);
+imagesc(truthAxes, 1:cfg.Nx, 1:cfg.Ny, trueEpsr.');
+axis(truthAxes, 'equal', 'tight');
+set(truthAxes, 'YDir', 'normal');
+colormap(truthAxes, turbo);
+if colorLimits(1) < colorLimits(2)
+    clim(truthAxes, colorLimits);
+end
+colorbar(truthAxes);
+xlabel(truthAxes, 'x grid index');
+ylabel(truthAxes, 'y grid index');
+title(truthAxes, 'True relative permittivity');
+exportgraphics(truthFigure, ...
+    fullfile(outputDir, 'epsr_true.png'), 'Resolution', 300);
 
-% Plot the accepted TR-shifted footprints and their overlap count.
-footprintFigure = figure('Name', 'Accepted TR-shifted footprint coverage', ...
-    'NumberTitle', 'off', 'Visible', 'on');
-plotCircularFootprintCoverage( ...
-    mask4D, xRange, yRange, pairAccepted, cfg, focusPoint);
-drawnow;
+errorFile = fopen(fullfile(outputDir, 'doi_error.txt'), 'w');
+assert(errorFile ~= -1, 'tds_2d:ErrorFileOpen', ...
+    'Could not create DOI error file in %s.', outputDir);
+errorFileCleanup = onCleanup(@() fclose(errorFile)); %#ok<NASGU>
+fprintf(errorFile, 'DOI = cfg.antennas.doiMask (%d grid cells)\n', ...
+    doiError.numPixels);
+fprintf(errorFile, 'MAE = mean(abs(reconstructed epsr - true epsr)) = %.9g\n', ...
+    doiError.meanAbsoluteError);
+fprintf(errorFile, 'RMSE = sqrt(mean((reconstructed epsr - true epsr)^2)) = %.9g\n', ...
+    doiError.rootMeanSquareError);
+fprintf(errorFile, 'MAPE = mean(abs(reconstructed epsr - true epsr) / abs(true epsr)) * 100 = %.9g %%\n', ...
+    doiError.meanAbsolutePercentageError);
+save(fullfile(outputDir, 'reconstruction.mat'), 'result');
 
-%% Reconstruct weighted epsr maps
-[epsr_final, epsr_num, epsr_den] = reconstructEpsrFromWeights( ...
-    eps_r, pairWeight, pairAccepted, mask4D);
-
-epsr_avg = averageEpsrFinal(epsr_num, epsr_den);
-
-%% Pad non-PML reconstruction back to full grid size for visualization
-epsr_avg_full = cfg.grid.background.epsr .* ones(cfg.Nx, cfg.Ny);
-epsr_avg_full(xRange, yRange) = epsr_avg;
-
-reconstructionFigure = figure;
-reconstructionAxes = axes('Parent', reconstructionFigure);
-plotMwiReconstruction(reconstructionAxes, cfg, epsr_avg_full);
-
-% Keep the footprint diagnostic visible when the script finishes.
-figure(footprintFigure);
-drawnow;
-
-%% Optional verification: constant pair estimates should reconstruct constant values where covered
-% eps_r_test = ones(size(eps_r));
-% [~, test_num, test_den] = reconstructEpsrFromWeights(eps_r_test, pairWeight, pairAccepted, mask4D);
-% test_avg = averageEpsrFinal(test_num, test_den);
-% disp([min(test_avg(:), [], 'omitnan'), max(test_avg(:), [], 'omitnan')]);
+fprintf('Estimated target epsr: %.6f from %d directed chords.\n', ...
+    recoveredTargetEpsr, maximumChordDetails.numSelectedDirectedRays);
+fprintf('Saved reconstruction in %s.\n', outputDir);
+end

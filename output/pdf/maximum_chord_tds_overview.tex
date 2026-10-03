@@ -14,10 +14,72 @@
 \maketitle
 \vspace{-1.7em}
 
+\section*{Receiver preprocessing for time reversal}
+Let $u_m^{\mathrm{target}}[k]$ and $u_m^{\mathrm{bg}}[k]$ be the received fields at antenna $m$ from forward runs with the same excitation, sampled at $t_k=(k-1)\Delta t$, $k=1,\ldots,N$.
+
+\textbf{1. Subtract the background.} Form the scattered trace
+\begin{equation}
+ s_m[k]=u_m^{\mathrm{target}}[k]-u_m^{\mathrm{bg}}[k].
+\end{equation}
+\textbf{2. Window each trace.} Apply a Gaussian centred at its largest absolute sample (first if tied):
+\begin{equation}
+ k_{p,m}=\underset{k}{\arg\max}\,|s_m[k]|,\qquad
+ w_m[k]=\exp\!\left[-\left(\frac{t_k-t_{k_{p,m}}}{\tau}\right)^2\right],\qquad
+ g_m[k]=w_m[k]s_m[k],
+\end{equation}
+where $\tau$ is the source-pulse width ($20\,\mathrm{ps}$).
+
+\textbf{3. Reverse and normalize.} The injected trace is
+\begin{equation}
+ u_m^{\mathrm{TR}}[k]=\frac{g_m[N+1-k]}{A_m},\qquad
+ A_m=\max_k|g_m[k]|,
+\end{equation}
+with $A_m=1$ for an identically zero trace, which remains zero.
+
 \section*{Motivation and required support}
 Bourqui and Fear estimate bulk breast-tissue permittivity from the extra transit time of a microwave pulse measured with tissue present versus a reference measurement without it \cite{bourqui2016}. Our numerical adaptation uses a two-dimensional FDTD cross-section and a circular antenna array. For each transmitter--receiver pair, we compare a target simulation with a background-only simulation. Unlike the paper's footprint-based property map, the method described here estimates one relative permittivity for a \emph{homogeneous} target and then fills its spatial support with that value.
 
 The algorithm requires a binary support image $M(\mathbf{x})\in\{0,1\}$ on the FDTD grid: $M=1$ inside the target and $M=0$ outside. The current \texttt{tds\_verification} study supplies the exact target mask as an oracle; a future hybrid method would substitute an estimated mask. Neither version needs the true target permittivity as an inversion input.
+
+\newpage
+\section*{Arrival detection and matched transmission delay}
+For antenna pair $i$, let $p[k]$ be the source trace and $u_{b,i}[k]$, $u_{t,i}[k]$ the unwindowed background and target receiver traces. With $\mathcal H$ denoting the discrete Hilbert transform, define the analytic-signal envelope
+\begin{equation}
+ \mathcal E[x][k]=\left|x[k]+\mathrm{i}\mathcal H[x][k]\right|,\qquad
+ a_s=\mathcal E[p],\quad a_{b,i}=\mathcal E[u_{b,i}],\quad a_{t,i}=\mathcal E[u_{t,i}],
+\end{equation}
+
+\textbf{1. Gate the background arrival.} With antenna separation $D_i$ and free-space speed $c_0$, set
+\begin{equation}
+ k_s=\min\{k:a_s[k]>0.01\max_j a_s[j]\},\qquad
+ k_{g,i}=\max\!\left(1,k_s+\left\lceil\frac{D_i}{c_0\Delta t}\right\rceil-1\right).
+\end{equation}
+On the pre-gate samples $B_i=\{k:1\leq k<k_{g,i},\ k\leq N\}$, let $\mu_i=\operatorname{median}_{k\in B_i}a_{b,i}[k]$ and set
+\begin{equation}
+ P_i=\max\!\left\{10^{-12},\;6(1.4826)\operatorname{median}_{k\in B_i}|a_{b,i}[k]-\mu_i|,\;10\max_{k\in B_i}a_{b,i}[k]\right\}.
+\end{equation}
+Take pre-gate statistics as zero if $B_i$ is empty. The background arrival $k_{b,i}$ is the first interior local peak of the gated envelope $\{a_{b,i}[k]\}_{k=k_{g,i}}^N$ with prominence at least $P_i$. Prominence is the peak height above the higher of the two side minima, searching each side up to a higher peak or the gated-record boundary. If no such peak exists, exclude the pair.
+
+\textbf{2. Match the target envelope.} Centre a reference window at $k_{b,i}$:
+\begin{equation}
+ h=\max\!\left(4,\operatorname{round}\frac{4\tau}{\Delta t}\right),\qquad
+ I_i=\{\max(1,k_{b,i}-h),\ldots,\min(N,k_{b,i}+h)\}.
+\end{equation}
+For integer lags $d=0,\ldots,d_{\max,i}$, where $d_{\max,i}=\min(120,N-\max I_i)$, maximize the normalized score
+\begin{equation}
+ R_i(d)=\frac{\sum_{k\in I_i}a_{b,i}[k]a_{t,i}[k+d]}
+ {\sqrt{\sum_{k\in I_i}a_{b,i}[k]^2}\sqrt{\sum_{k\in I_i}a_{t,i}[k+d]^2}},\qquad
+ d_i^*=\underset{d}{\arg\max}\,R_i(d).
+\end{equation}
+Ignore windows with numerically zero norm; exclude the pair if no valid score remains. Choose the smallest maximizing lag.
+
+\textbf{3. Refine the lag.} For an interior maximum with finite neighbouring scores, let $R_-=R_i(d_i^*-1)$, $R_0=R_i(d_i^*)$, $R_+=R_i(d_i^*+1)$ and $C_i=R_--2R_0+R_+$. If $C_i<0$, use the clipped parabolic offset
+\begin{equation}
+ \delta_i=\min\!\left(\tfrac12,\max\!\left(-\tfrac12,\frac{R_--R_+}{2C_i}\right)\right);
+ \qquad \Delta t_i=(d_i^*+\delta_i)\Delta t.
+ \label{eq:matched-delay}
+\end{equation}
+Otherwise set $\delta_i=0$.
 
 \section*{Transmission delay and permittivity}
 For a nonmagnetic medium, using an effective, weak-loss refractive index $n\simeq\sqrt{\epsilon_r}$, the propagation speed is $v\simeq c_0/n$. Let $D_i$ be the separation of antenna pair $i$, $n_b=\sqrt{\epsilon_{r,b}}$ the background index, and $n_t=\sqrt{\epsilon_{r,t}}$ the unknown homogeneous target index. The length of the straight antenna-to-antenna segment inside the support is
@@ -31,9 +93,8 @@ Under the straight-path approximation, the target and reference transit times di
  =\frac{L_i}{c_0}(n_t-n_b).
  \label{eq:delay}
 \end{equation}
-Thus a single usable path suggests $\epsilon_{r,t}\simeq(n_b+c_0\Delta t_i/L_i)^2$. If the entire antenna separation is target material ($L_i=D_i$) and the reference is air ($n_b=1$), this reduces to the bulk-delay expression used by Bourqui and Fear \cite{bourqui2016}. In this implementation, $\Delta t_i$ is obtained by aligning the Hilbert envelopes of the target and reference receiver pulses using a normalized lag score, followed by a small parabolic refinement of its peak; the paper itself used a peak-to-peak pulse delay.
+Thus a single usable path suggests $\epsilon_{r,t}\simeq(n_b+c_0\Delta t_i/L_i)^2$. If the entire antenna separation is target material ($L_i=D_i$) and the reference is air ($n_b=1$), this reduces to the bulk-delay expression used by Bourqui and Fear \cite{bourqui2016}. Here $\Delta t_i$ is the matched-envelope delay in \eqref{eq:matched-delay}; the paper itself used a peak-to-peak pulse delay.
 
-\newpage
 \section*{Maximum-chord estimate and reconstructed image}
 The code first forms the candidate set $\mathcal C$ of antenna pairs allowed by the $40^\circ$ off-boresight rule and having finite, nonnegative matched delays and $L_i>0$. Let $L_{\max}=\max_{i\in\mathcal C}L_i$. Only pairs in
 \begin{equation}

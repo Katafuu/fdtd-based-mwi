@@ -8,7 +8,7 @@ if nargin < 2 || isempty(forceRecompute)
     forceRecompute = false;
 end
 validateattributes(verificationSeed, {'numeric'}, ...
-    {'real', 'finite', 'scalar', 'integer', 'positive'}, ...
+    {'real', 'finite', 'scalar', 'integer', 'positive', '<=', 2^32-1}, ...
     mfilename, 'verificationSeed');
 validateattributes(forceRecompute, {'logical', 'numeric'}, ...
     {'scalar'}, mfilename, 'forceRecompute');
@@ -32,7 +32,9 @@ if ~logical(forceRecompute) && isfile(cacheFile)
     end
 end
 
-run(fullfile(algorithmDirectory, 'build_cfg.m'));
+addpath(algorithmDirectory, '-begin');
+setup = struct('targetOpts', struct(), 'randomSeed', verificationSeed);
+cfg = build_cfg(setup);
 measurement = acquireTransmissionMeasurements(cfg);
 measurement.seed = verificationSeed;
 save(cacheFile, 'measurement');

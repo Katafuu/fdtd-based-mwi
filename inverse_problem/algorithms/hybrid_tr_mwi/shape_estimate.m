@@ -1,7 +1,7 @@
-% Run one time-reversal iteration per antenna and collect each focus point.
+function [supportMask, shapeDetails] = shape_estimate(cfg, figsDir)
+%shape_estimate Estimate a binary support from time-reversal focus points.
 
-if ~exist('cfg', 'var')
-    addpath(fileparts(mfilename('fullpath')), '-begin');
+if nargin < 1 || isempty(cfg)
     cfg = build_cfg(struct());
 end
 assert(isstruct(cfg) && isscalar(cfg), ...
@@ -10,7 +10,9 @@ assert(isstruct(cfg) && isscalar(cfg), ...
 cfg.opts.numIterations = 1; % Use one TR cycle per antenna estimate.
 
 scriptDir = fileparts(mfilename('fullpath'));
-figsDir = fullfile(scriptDir, 'figs', 'shape_estimate');
+if nargin < 2 || isempty(figsDir)
+    figsDir = fullfile(scriptDir, 'figs', 'shape_estimate');
+end
 if ~isfolder(figsDir)
     mkdir(figsDir);
 end
@@ -46,6 +48,10 @@ fprintf('Average runtime per antenna: %.2f seconds.\n', averageRuntime);
 
 %% Plot all antenna focus estimates
 saveFocusOverview(points, cfg, targetMask, figsDir);
+[supportMask, orderedPoints] = buildShapeSupportMask( ...
+    points, cfg.antennas.doiMask, 1.5);
+shapeDetails = struct('focusPoints', points, ...
+    'estimatedOutlinePoints', orderedPoints);
 
 %% Plotting functions
 
@@ -89,4 +95,6 @@ function saveFocusOverview(points, cfg, targetMask, figsDir)
         fullfile(figsDir, 'all_maximum_points.png'), 'Resolution', 300);
     exportgraphics(outlineFigure, ...
         fullfile(figsDir, 'estimated_outline.png'), 'Resolution', 300);
+end
+
 end

@@ -21,7 +21,7 @@ classdef testConfigurationTimeSteps < matlab.unittest.TestCase
             expectedNt = [4243 600 600 800 600 800];
 
             for builderIndex = 1:numel(builderPaths)
-                if builderIndex == 3
+                if ismember(builderIndex, [3 5])
                     addpath(fileparts(builderPaths{builderIndex}), '-begin');
                     cfg = build_cfg(struct());
                 else
